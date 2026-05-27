@@ -1,0 +1,84 @@
+# 策略参数配置
+
+# 热门币种筛选
+hot_coins:
+  top_n: 18                    # 热门币数量
+  refresh_interval: 3600       # 刷新间隔（秒）
+  min_volume_usdt: 1000000     # 最小24h成交额(USDT)
+  blacklist: ["USDC", "BUSD", "TUSD"]  # 排除稳定币
+
+# 技术指标参数
+indicators:
+  ema:
+    fast: 9
+    medium: 21
+    slow: 55
+  rsi:
+    period: 14
+    overbought: 70
+    oversold: 30
+  macd:
+    fast: 12
+    slow: 26
+    signal: 9
+  bollinger:
+    period: 20
+    std: 2
+  atr:
+    period: 14
+  volume_sma:
+    period: 20
+    spike_threshold: 1.5  # 放量倍数
+  stoch_rsi:
+    period: 14
+    smooth_k: 3
+    smooth_d: 3
+
+# 规则信号
+rules:
+  min_conditions: 3  # 最少满足条件数（共6个）
+  direction_mode: "both"  # both / long_only / short_only
+
+# ADX 趋势强度过滤
+adx:
+  period: 14
+  threshold: 15  # ADX < 15 视为震荡市场，不交易
+
+# ML 模型
+ml:
+  train_days: 90           # 训练数据天数
+  retrain_interval: 604800 # 重新训练间隔（秒，7天）
+  predict_horizon: 4       # 预测未来N根K线
+  confidence_threshold: 0.6 # 置信度阈值
+  model_path: "data/ml_model.pkl"
+
+# 风控参数
+risk:
+  max_position_pct: 0.02       # 单笔最大亏损占总资金比例
+  max_concurrent_positions: 5  # 最大同时持仓数
+  max_daily_loss: 0.05         # 日最大亏损比例
+  min_risk_reward: 2.0         # 最小盈亏比
+
+# 杠杆设置
+leverage:
+  min: 5
+  max: 5
+  signal_thresholds:
+    strong: 0.8    # 信号强度>0.8 → 高杠杆
+    medium: 0.6    # 信号强度>0.6 → 中杠杆
+    weak: 0.4      # 信号强度<0.6 → 低杠杆
+
+# 止损策略
+stop_loss:
+  atr_multiplier: 1.0
+  max_pct: 0.008             # 最大止损 0.8%
+  fixed_pct: 0.008           # 固定止损 0.8%
+  trailing_activate: 0.0     # 禁用追踪止损
+  trailing_callback: 0.015   # 追踪回撤1.5%
+
+# 止盈策略
+take_profit:
+  risk_reward_ratio: 0.625   # RR=1:0.625 → TP=0.5% when SL=0.8%
+  fixed_pct: 0.005           # 固定止盈 0.5% (R:R = 1:0.625)
+  partial_close_pct: 0.5     # 盈利目标达50%时平一半
+  partial_close_trigger: 0.0  # 禁用部分止盈

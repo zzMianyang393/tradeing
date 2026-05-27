@@ -1,0 +1,22 @@
+# API keys and secrets
+config/settings.yaml
+.env
+*.env
+
+# Data files
+data/*.db
+data/*.pkl
+data/*.csv
+
+# Logs
+logs/
+
+# Reports
+reports/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
