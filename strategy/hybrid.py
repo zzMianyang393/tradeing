@@ -1,5 +1,7 @@
 """混合策略模块 - 结合规则信号和ML确认"""
 
+from __future__ import annotations
+
 from typing import Optional
 from dataclasses import dataclass
 
@@ -9,6 +11,7 @@ from loguru import logger
 from .indicators import TechnicalIndicators
 from .signals import SignalGenerator, Signal, SignalType
 from .ml_model import MLModel
+
 
 
 @dataclass

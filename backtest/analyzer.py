@@ -1,5 +1,7 @@
 """回测结果分析模块"""
 
+from __future__ import annotations
+
 from typing import Optional
 from dataclasses import dataclass
 
@@ -8,6 +10,7 @@ import pandas as pd
 from loguru import logger
 
 from execution.account import TradeRecord
+
 
 
 @dataclass

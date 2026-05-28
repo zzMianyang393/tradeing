@@ -1,10 +1,13 @@
 """账户管理模块"""
 
+from __future__ import annotations
+
 from dataclasses import dataclass, field
 from typing import Optional
 from datetime import datetime
 
 from loguru import logger
+
 
 
 @dataclass
@@ -40,13 +43,27 @@ class TradeRecord:
 
 
 class AccountManager:
-    def __init__(self, initial_capital: float = 10.0):
+    def __init__(self, initial_capital: float = 10.0, storage=None):
         self.initial_capital = initial_capital
         self.balance = initial_capital
         self.positions: dict[str, Position] = {}
         self.trade_history: list[TradeRecord] = []
         self.daily_pnl = 0.0
         self.total_pnl = 0.0
+        self._storage = storage
+        if storage is not None:
+            self._load_history()
+
+    def _load_history(self):
+        """从数据库加载历史交易，恢复 total_pnl"""
+        try:
+            trades = self._storage.load_trades()
+            if trades:
+                self.trade_history = trades
+                self.total_pnl = sum(t.pnl for t in trades)
+                logger.info(f"从数据库加载了 {len(trades)} 笔历史交易，累计盈亏={self.total_pnl:.4f}U")
+        except Exception as e:
+            logger.warning(f"加载历史交易失败: {e}")
 
     @property
     def open_positions(self) -> int:
@@ -140,6 +157,13 @@ class AccountManager:
         self.trade_history.append(record)
         self.daily_pnl += pnl
         self.total_pnl += pnl
+
+        # 持久化到数据库
+        if self._storage is not None:
+            try:
+                self._storage.save_trade(record)
+            except Exception as e:
+                logger.warning(f"保存交易记录失败: {e}")
 
         emoji = "+" if pnl >= 0 else ""
         logger.info(

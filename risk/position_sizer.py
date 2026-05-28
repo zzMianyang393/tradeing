@@ -1,6 +1,9 @@
 """仓位管理模块 - 动态仓位和杠杆计算"""
 
+from __future__ import annotations
+
 from dataclasses import dataclass
+
 
 
 @dataclass

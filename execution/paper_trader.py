@@ -11,13 +11,14 @@ from strategy.hybrid import HybridStrategy, TradeSignal
 from risk.position_sizer import PositionSizer
 from risk.stop_loss import StopLossManager
 from risk.take_profit import TakeProfitManager
-
-
+from data.storage import DataStorage
 class PaperTrader:
     def __init__(self, config: dict):
         self.config = config
+        self.storage = DataStorage()
         self.account = AccountManager(
-            initial_capital=config.get("general", {}).get("initial_capital", 10.0)
+            initial_capital=config.get("general", {}).get("initial_capital", 10.0),
+            storage=self.storage,
         )
         self.strategy = HybridStrategy(config)
         self.position_sizer = PositionSizer(config)

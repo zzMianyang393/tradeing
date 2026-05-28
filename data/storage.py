@@ -35,8 +35,67 @@ class DataStorage:
                 CREATE INDEX IF NOT EXISTS idx_klines_symbol_tf_ts
                 ON klines(symbol, timeframe, timestamp)
             """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS trade_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    symbol TEXT NOT NULL,
+                    direction TEXT NOT NULL,
+                    entry_price REAL NOT NULL,
+                    exit_price REAL NOT NULL,
+                    size REAL NOT NULL,
+                    leverage INTEGER NOT NULL,
+                    pnl REAL NOT NULL,
+                    pnl_pct REAL NOT NULL,
+                    open_time TEXT NOT NULL,
+                    close_time TEXT NOT NULL,
+                    close_reason TEXT NOT NULL
+                )
+            """)
             conn.commit()
         logger.debug(f"数据库初始化完成: {self.db_path}")
+
+    def save_trade(self, record) -> None:
+        """保存一笔交易记录到数据库"""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("""
+                INSERT INTO trade_history
+                (symbol, direction, entry_price, exit_price, size, leverage,
+                 pnl, pnl_pct, open_time, close_time, close_reason)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                record.symbol, record.direction,
+                record.entry_price, record.exit_price,
+                record.size, record.leverage,
+                record.pnl, record.pnl_pct,
+                record.open_time.isoformat() if hasattr(record.open_time, 'isoformat') else str(record.open_time),
+                record.close_time.isoformat() if hasattr(record.close_time, 'isoformat') else str(record.close_time),
+                record.close_reason,
+            ))
+            conn.commit()
+        logger.debug(f"交易记录已保存: {record.symbol} {record.direction} pnl={record.pnl:.4f}U")
+
+    def load_trades(self) -> list:
+        """加载所有历史交易记录"""
+        from execution.account import TradeRecord
+        from datetime import datetime as dt
+        trades = []
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute("SELECT * FROM trade_history ORDER BY id ASC")
+            for row in cursor.fetchall():
+                trades.append(TradeRecord(
+                    symbol=row[1],
+                    direction=row[2],
+                    entry_price=row[3],
+                    exit_price=row[4],
+                    size=row[5],
+                    leverage=row[6],
+                    pnl=row[7],
+                    pnl_pct=row[8],
+                    open_time=dt.fromisoformat(row[9]),
+                    close_time=dt.fromisoformat(row[10]),
+                    close_reason=row[11],
+                ))
+        return trades
 
     def save_klines(self, symbol: str, timeframe: str, df: pd.DataFrame):
         if df.empty:

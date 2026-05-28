@@ -1,5 +1,7 @@
 """数据获取模块 - 通过ccxt获取OKX公开K线数据"""
 
+from __future__ import annotations
+
 import time
 from typing import Optional
 from datetime import datetime, timedelta
@@ -9,6 +11,7 @@ import pandas as pd
 from loguru import logger
 
 from .storage import DataStorage
+
 
 
 # OKX 时间框架映射

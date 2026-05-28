@@ -1,5 +1,7 @@
 """回测引擎 - 本地模拟历史交易"""
 
+from __future__ import annotations
+
 from typing import Optional
 from datetime import datetime
 
@@ -12,6 +14,7 @@ from risk.position_sizer import PositionSizer
 from risk.stop_loss import StopLossManager, StopLossResult
 from risk.take_profit import TakeProfitManager, TakeProfitResult
 from execution.account import AccountManager, TradeRecord
+
 
 
 class BacktestEngine:
