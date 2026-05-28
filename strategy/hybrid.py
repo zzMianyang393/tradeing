@@ -47,11 +47,14 @@ class HybridStrategy:
         ml_pred = self.ml_model.predict(df)
 
         strength = rule_signal.strength
-        ml_agrees = (
-            (rule_signal.type == SignalType.LONG and ml_pred["long_prob"] > 0.5)
-            or (rule_signal.type == SignalType.SHORT and ml_pred["short_prob"] > 0.5)
-        )
-        if ml_agrees and ml_pred["confidence"] > 0.3:
+        
+        # ML确认：如果ML预测方向一致，增强信号强度
+        ml_confirms = False
+        if rule_signal.type == SignalType.LONG and ml_pred["long_prob"] > 0.55:
+            ml_confirms = True
+            strength = min(strength + 0.1, 1.0)
+        elif rule_signal.type == SignalType.SHORT and ml_pred["short_prob"] > 0.55:
+            ml_confirms = True
             strength = min(strength + 0.1, 1.0)
 
         signal = TradeSignal(
@@ -63,6 +66,7 @@ class HybridStrategy:
             reason=(
                 f"{rule_signal.reason} | "
                 f"ML: prob={ml_pred['long_prob'] if rule_signal.type == SignalType.LONG else ml_pred['short_prob']:.3f}"
+                f"{' ✓确认' if ml_confirms else ''}"
             ),
         )
 

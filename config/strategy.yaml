@@ -56,25 +56,25 @@ ml:
 risk:
   max_position_pct: 0.02       # 单笔最大亏损占总资金比例
   max_concurrent_positions: 5  # 最大同时持仓数
-  max_daily_loss: 0.05         # 日最大亏损比例
+  max_daily_loss: 0.10         # 日最大亏损比例(10%)
   min_risk_reward: 2.0         # 最小盈亏比
 
-# 杠杆设置
+# 杠杆设置 — 程序根据信号强度在min~max之间动态选择
 leverage:
   min: 5
-  max: 5
+  max: 50
   signal_thresholds:
-    strong: 0.8    # 信号强度>0.8 → 高杠杆
-    medium: 0.6    # 信号强度>0.6 → 中杠杆
-    weak: 0.4      # 信号强度<0.6 → 低杠杆
+    strong: 0.8    # 信号强度>0.8 → 接近max
+    medium: 0.6    # 信号强度>0.6 → 中间值
+    weak: 0.4      # 信号强度<0.4 → 接近min
 
 # 止损策略
 stop_loss:
   atr_multiplier: 1.0
   max_pct: 0.008             # 最大止损 0.8%
   fixed_pct: 0.008           # 固定止损 0.8%
-  trailing_activate: 0.0     # 禁用追踪止损
-  trailing_callback: 0.015   # 追踪回撤1.5%
+  trailing_activate: 0.003   # 盈利0.3%后激活追踪止损
+  trailing_callback: 0.005   # 追踪回撤0.5%平仓
 
 # 止盈策略
 take_profit:

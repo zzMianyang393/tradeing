@@ -64,6 +64,7 @@ def cmd_backtest(args, config: dict):
 
     all_data = {}
     train_data = {}
+    htf_data = {}  # 高时间框架数据（4h）
 
     csv_files = {
         "BTC/USDT:USDT": "data/BTC_15m.csv",
@@ -81,6 +82,15 @@ def cmd_backtest(args, config: dict):
             logger.warning(f"{symbol} 数据不足，跳过")
             continue
 
+        # 获取4小时数据用于趋势过滤
+        try:
+            htf_df = fetcher.sync_klines(symbol, "4h", days=days)
+            if not htf_df.empty and len(htf_df) > 20:
+                htf_data[symbol] = htf_df
+                logger.info(f"{symbol}: 4h数据 {len(htf_df)} 条")
+        except Exception as e:
+            logger.warning(f"{symbol}: 获取4h数据失败: {e}")
+
         split = int(len(df) * 0.7)
         train_data[symbol] = df.iloc[:split]
         all_data[symbol] = df.iloc[split:]
@@ -91,7 +101,7 @@ def cmd_backtest(args, config: dict):
         return
 
     engine = BacktestEngine(config)
-    stats = engine.run_multi(all_data, train_data)
+    stats = engine.run_multi(all_data, train_data, htf_data)
 
     analyzer = BacktestAnalyzer(config["general"]["initial_capital"])
     if "trades" in stats and stats["trades"]:
@@ -395,6 +405,7 @@ def _try_open(executor, strategy, position_sizer, stop_loss_mgr,
         current_positions=0,
     )
     amount_usdt = pos_size.amount_usdt if pos_size.amount_usdt > 0 else available * 0.50
+    leverage = pos_size.leverage if pos_size.leverage > 0 else leverage  # 用动态杠杆
 
     if amount_usdt < 1:
         logger.warning(f"可用资金不足({available:.2f}U)，跳过 {symbol}")
@@ -452,9 +463,10 @@ def _record_trade(storage, symbol, side, pos, exit_price, reason):
             pnl_pct = (entry_price - exit_price) / entry_price
         pnl_pct *= leverage
         pnl = size * pnl_pct
-        # 手续费按名义价值收，不是保证金
-        fee = notional * 0.0005
-        pnl -= fee
+        # 手续费: 开仓 + 平仓都按名义价值收
+        open_fee = notional * 0.0005  # 开仓手续费
+        close_fee = notional * 0.0005  # 平仓手续费
+        pnl -= (open_fee + close_fee)
         record = TradeRecord(
             symbol=symbol, direction=side,
             entry_price=entry_price, exit_price=exit_price,

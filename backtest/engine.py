@@ -46,6 +46,13 @@ class BacktestEngine:
         if df.empty or len(df) < 60:
             return {"error": "数据不足"}
 
+        # 计算高时间框架指标（用于趋势过滤）
+        htf_indicators = None
+        if htf_data is not None and not htf_data.empty:
+            htf_df = self.indicators.calculate(htf_data)
+            if not htf_df.empty and len(htf_df) > 20:
+                htf_indicators = htf_df
+
         logger.info(f"回测 {symbol}: {len(df)} 根K线")
 
         for i in range(60, len(df)):
@@ -60,8 +67,11 @@ class BacktestEngine:
                 current_ts = 0
             current_time = datetime.utcfromtimestamp(current_ts / 1000) if current_ts else datetime.utcnow()
 
+            # 获取当前高时间框架趋势（用15m数据模拟）
+            htf_trend = self._get_htf_trend_from_15m(window)
+
             self._check_positions(symbol, current_price, current, current_time)
-            self._check_signals(symbol, window, current_price, current_time)
+            self._check_signals(symbol, window, current_price, current_time, htf_trend)
 
         self._close_all_positions(symbol, df.iloc[-1], df.index[-1])
 
@@ -79,12 +89,51 @@ class BacktestEngine:
         all_stats = {}
         for symbol, df in data.items():
             train = train_data.get(symbol) if train_data else None
-            all_stats[symbol] = self.run(symbol, df, train)
+            htf = htf_data.get(symbol) if htf_data else None
+            all_stats[symbol] = self.run(symbol, df, train, htf)
 
         combined_stats = self.account.get_stats()
         combined_stats["by_symbol"] = all_stats
         combined_stats["trades"] = self.trade_log
         return combined_stats
+
+    def _get_htf_trend(self, htf_df: pd.DataFrame, current_time: datetime) -> str:
+        """获取高时间框架趋势方向（用15m数据模拟4h趋势）"""
+        if htf_df is None or htf_df.empty:
+            return "neutral"
+        
+        # 取最近16根K线（=4小时）
+        recent = htf_df.tail(16)
+        if len(recent) < 16:
+            return "neutral"
+        
+        ema_slow = recent.iloc[-1].get("ema_slow", 0)
+        price = recent.iloc[-1].get("close", 0)
+        
+        if ema_slow > 0:
+            if price < ema_slow * 0.99:
+                return "bearish"
+            elif price > ema_slow * 1.01:
+                return "bullish"
+        
+        return "neutral"
+
+    def _get_htf_trend_from_15m(self, window: pd.DataFrame) -> str:
+        """用15m数据的最近16根K线模拟4h趋势"""
+        if window is None or len(window) < 16:
+            return "neutral"
+        
+        recent = window.tail(16)
+        ema_slow = recent.iloc[-1].get("ema_slow", 0)
+        price = recent.iloc[-1].get("close", 0)
+        
+        if ema_slow > 0:
+            if price < ema_slow * 0.99:
+                return "bearish"
+            elif price > ema_slow * 1.01:
+                return "bullish"
+        
+        return "neutral"
 
     def _check_positions(
         self, symbol: str, price: float, row: pd.Series, time: datetime
@@ -119,6 +168,7 @@ class BacktestEngine:
 
     def _check_signals(
         self, symbol: str, df: pd.DataFrame, price: float, time: datetime,
+        htf_trend: str = None,
     ):
         if symbol in self.current_positions:
             return
@@ -135,7 +185,21 @@ class BacktestEngine:
         if signal is None:
             return
 
+        # 多时间框架过滤：只做顺势交易
+        if htf_trend is not None:
+            if signal.direction == "short" and htf_trend == "bullish":
+                return  # 大趋势向上，不做空
+            if signal.direction == "long" and htf_trend == "bearish":
+                return  # 大趋势向下，不做多
+
         row = df.iloc[-1]
+
+        # 滑点模拟：开仓价格恶化
+        slippage = self.config.get("general", {}).get("slippage", 0.001)
+        if signal.direction == "long":
+            entry_price = price * (1 + slippage)  # 做多买入价更高
+        else:
+            entry_price = price * (1 - slippage)  # 做空卖出价更低
 
         fixed_sl_pct = self.config.get("stop_loss", {}).get("fixed_pct")
         if fixed_sl_pct is not None and fixed_sl_pct > 0:
@@ -153,12 +217,21 @@ class BacktestEngine:
         else:
             tp = self.take_profit_mgr.calculate_target(price, sl.stop_pct, signal.direction)
 
+        # 获取历史交易统计用于凯利公式
+        stats = self.account.get_stats()
+        win_rate = stats.get("win_rate")
+        avg_win = stats.get("avg_win")
+        avg_loss = stats.get("avg_loss")
+
         position = self.position_sizer.calculate_position(
             balance=self.account.balance,
-            entry_price=price,
+            entry_price=entry_price,
             stop_distance_pct=sl.stop_pct,
             signal_strength=signal.strength,
             current_positions=self.account.open_positions,
+            win_rate=win_rate,
+            avg_win=avg_win,
+            avg_loss=avg_loss,
         )
 
         if position.amount_usdt <= 0:
@@ -166,7 +239,7 @@ class BacktestEngine:
 
         self.current_positions[symbol] = {
             "direction": signal.direction,
-            "entry_price": price,
+            "entry_price": entry_price,  # 使用滑点后的价格
             "size": position.amount_usdt,
             "leverage": position.leverage,
             "stop_loss": sl.stop_price,
@@ -206,18 +279,28 @@ class BacktestEngine:
 
         pos = self.current_positions[symbol]
 
+        # 滑点模拟：平仓价格恶化
+        slippage = self.config.get("general", {}).get("slippage", 0.001)
         if pos["direction"] == "long":
-            pnl_pct = (price - pos["entry_price"]) / pos["entry_price"]
+            close_price = price * (1 - slippage)  # 做多平仓卖出价更低
         else:
-            pnl_pct = (pos["entry_price"] - price) / pos["entry_price"]
+            close_price = price * (1 + slippage)  # 做空平仓买入价更高
+
+        if pos["direction"] == "long":
+            pnl_pct = (close_price - pos["entry_price"]) / pos["entry_price"]
+        else:
+            pnl_pct = (pos["entry_price"] - close_price) / pos["entry_price"]
 
         pnl_pct *= pos["leverage"]
 
         close_size = partial_size if partial_size else pos["size"]
         pnl = close_size * pnl_pct
 
-        fee = close_size * 0.0005
-        pnl -= fee
+        # 手续费: 开仓 + 平仓，都按名义价值(保证金*杠杆)收
+        notional = close_size * pos["leverage"]
+        open_fee = notional * 0.0005   # 开仓手续费
+        close_fee = notional * 0.0005  # 平仓手续费
+        pnl -= (open_fee + close_fee)
 
         self.account.balance += pnl
         self.account.total_pnl += pnl

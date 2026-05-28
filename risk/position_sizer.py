@@ -1,9 +1,9 @@
-"""仓位管理模块 - 动态仓位和杠杆计算"""
+"""仓位管理模块 - 动态仓位和杠杆计算（含凯利公式）"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-
+from typing import Optional
 
 
 @dataclass
@@ -33,6 +33,11 @@ class PositionSizer:
             "weak": 0.4,
         })
 
+        # 凯利公式参数
+        self.kelly_fraction = risk_cfg.get("kelly_fraction", 0.5)  # 半凯利
+        self.min_position_pct = risk_cfg.get("min_position_pct", 0.05)
+        self.max_position_pct_cap = risk_cfg.get("max_position_pct_cap", 0.30)
+
     def calculate_leverage(self, signal_strength: float) -> int:
         if signal_strength >= self.thresholds["strong"]:
             return self.max_leverage
@@ -44,6 +49,36 @@ class PositionSizer:
         else:
             return self.min_leverage
 
+    def kelly_criterion(
+        self,
+        win_rate: float,
+        avg_win: float,
+        avg_loss: float,
+    ) -> float:
+        """凯利公式计算最优仓位比例
+        
+        Kelly % = (W * R - (1-W)) / R
+        其中 W = 胜率, R = 盈亏比 (avg_win / avg_loss)
+        
+        使用半凯利（kelly_fraction）降低风险
+        """
+        if avg_loss <= 0 or win_rate <= 0:
+            return self.min_position_pct
+        
+        R = avg_win / avg_loss  # 盈亏比
+        W = win_rate
+        
+        kelly = (W * R - (1 - W)) / R
+        
+        # 应用凯利分数（半凯利更安全）
+        kelly *= self.kelly_fraction
+        
+        # 限制范围
+        kelly = max(kelly, self.min_position_pct)
+        kelly = min(kelly, self.max_position_pct_cap)
+        
+        return kelly
+
     def calculate_position(
         self,
         balance: float,
@@ -51,6 +86,9 @@ class PositionSizer:
         stop_distance_pct: float,
         signal_strength: float,
         current_positions: int = 0,
+        win_rate: float = None,
+        avg_win: float = None,
+        avg_loss: float = None,
     ) -> PositionSize:
         if current_positions >= self.max_concurrent:
             return PositionSize(0, 0, 0, 0)
@@ -63,11 +101,17 @@ class PositionSizer:
         if stop_distance_pct <= 0:
             stop_distance_pct = 0.01
 
-        notional = risk_amount / stop_distance_pct
-        amount_usdt = notional / leverage
-        amount_usdt = min(amount_usdt, balance * 0.3)
+        # 如果有历史交易数据，用凯利公式计算仓位
+        if win_rate is not None and avg_win is not None and avg_loss is not None:
+            kelly_pct = self.kelly_criterion(win_rate, avg_win, avg_loss)
+            amount_usdt = balance * kelly_pct
+        else:
+            # 默认仓位：25%资金，上限5U
+            amount_usdt = min(balance * 0.25, 5.0)
+        
+        amount_usdt = max(amount_usdt, 1.0)  # 最少1U
 
-        if amount_usdt < 1:
+        if amount_usdt > balance:
             return PositionSize(0, 0, 0, 0)
 
         position_pct = amount_usdt / balance
