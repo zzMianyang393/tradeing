@@ -318,7 +318,9 @@ def _live_tick(
             df = indicators.calculate(df)
 
             if symbol in position_symbols:
-                _manage_position(executor, symbol, positions, df, config, storage=storage)
+                _manage_position(
+                    executor, strategy, symbol, positions, df, config, storage=storage
+                )
             elif api_ok:
                 # HIGH #4: 每次开仓后扣减available，避免超支
                 opened = _try_open(executor, strategy, position_sizer, stop_loss_mgr,
@@ -330,7 +332,7 @@ def _live_tick(
             logger.error(f"{symbol} 处理异常: {e}")
 
 
-def _manage_position(executor, symbol, positions, df, config, storage=None):
+def _manage_position(executor, strategy, symbol, positions, df, config, storage=None):
     pos = next((p for p in positions if p["symbol"] == symbol), None)
     if not pos:
         return
@@ -357,6 +359,28 @@ def _manage_position(executor, symbol, positions, df, config, storage=None):
         pnl_pct = (entry_price - current_price) / entry_price
         sl_price = entry_price * (1 + fixed_sl_pct)
         tp_price = entry_price * (1 - fixed_tp_pct)
+
+    try:
+        advice = strategy.advise_position(
+            symbol=symbol,
+            df=df,
+            side=side,
+            entry_price=entry_price,
+            current_price=current_price,
+        )
+    except Exception as e:
+        advice = {"action": "hold", "reason": f"ML advisor error: {e}"}
+
+    if advice.get("action") == "close":
+        logger.info(f"[ML平仓] {symbol} {side} 盈亏={pnl_pct:.2%} | {advice.get('reason')}")
+        executor.close_position(symbol, side)
+        _record_trade(storage, symbol, side, pos, current_price, "ML advisor close")
+        return
+
+    if advice.get("action") == "protect":
+        stop_price = float(advice.get("stop_price", entry_price))
+        executor.set_stop_loss(symbol, side, stop_price, contracts=contracts)
+        logger.info(f"[ML保护止损] {symbol} {side} stop={stop_price} | {advice.get('reason')}")
 
     if pnl_pct <= -fixed_sl_pct:
         logger.info(f"[止损] {symbol} {side} 盈亏={pnl_pct:.2%}")
@@ -390,10 +414,13 @@ def _try_open(executor, strategy, position_sizer, stop_loss_mgr,
     signal = strategy.analyze(symbol, df)
     if signal is None:
         return 0
-    if signal.direction != "long":
-        return 0
 
     entry_price = float(df["close"].iloc[-1])
+    entry_advice = None
+    if config.get("ml", {}).get("enabled") and config.get("ml", {}).get("mode") == "advisor":
+        entry_advice = strategy._build_entry_advice(signal.direction, signal.ml_prediction)
+        fixed_sl_pct = entry_advice["stop_loss_pct"]
+        fixed_tp_pct = entry_advice["take_profit_pct"]
 
     # CRITICAL #3: 用PositionSizer计算仓位，而不是固定50%
     entry_price_for_sizer = entry_price
@@ -411,7 +438,10 @@ def _try_open(executor, strategy, position_sizer, stop_loss_mgr,
         logger.warning(f"可用资金不足({available:.2f}U)，跳过 {symbol}")
         return 0
 
-    order = executor.open_long(symbol, amount_usdt, leverage, entry_price)
+    if signal.direction == "long":
+        order = executor.open_long(symbol, amount_usdt, leverage, entry_price)
+    else:
+        order = executor.open_short(symbol, amount_usdt, leverage, entry_price)
     if order:
         # Use actual fill price from order, fallback to current ticker
         fill_price = order.get("average") or order.get("price") or entry_price
@@ -429,11 +459,17 @@ def _try_open(executor, strategy, position_sizer, stop_loss_mgr,
         except Exception:
             actual_contracts = 0
 
-        sl_price = fill_price * (1 - fixed_sl_pct)
-        tp_price = fill_price * (1 + fixed_tp_pct)
+        if signal.direction == "long":
+            sl_price = fill_price * (1 - fixed_sl_pct)
+            tp_price = fill_price * (1 + fixed_tp_pct)
+        else:
+            sl_price = fill_price * (1 + fixed_sl_pct)
+            tp_price = fill_price * (1 - fixed_tp_pct)
         # CRITICAL #1: 传入实际持仓张数
-        executor.set_stop_loss(symbol, "long", sl_price, contracts=actual_contracts)
-        executor.set_take_profit(symbol, "long", tp_price, contracts=actual_contracts)
+        executor.set_stop_loss(symbol, signal.direction, sl_price, contracts=actual_contracts)
+        executor.set_take_profit(symbol, signal.direction, tp_price, contracts=actual_contracts)
+        if entry_advice:
+            logger.info(f"[ML开仓建议] {symbol} {signal.direction} | {entry_advice['reason']}")
         logger.info(f"[开仓] {symbol} LONG 入场={fill_price} SL={sl_price} TP={tp_price} 金额={amount_usdt:.2f}U 张数={actual_contracts}")
         return amount_usdt  # 返回实际使用的保证金，供available扣减
 

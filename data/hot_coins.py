@@ -45,8 +45,11 @@ class HotCoinSelector:
             base = symbol.split("/")[0]
             if base in blacklist:
                 continue
-            if t["quoteVolume"] < min_volume_usdt:
+            quote_volume = float(t.get("quoteVolume") or 0)
+            if quote_volume < min_volume_usdt:
                 continue
+            t["quoteVolume"] = quote_volume
+            t["percentage"] = float(t.get("percentage") or 0)
             filtered.append(t)
 
         for t in filtered:
