@@ -36,8 +36,9 @@ indicators:
 
 # 规则信号
 rules:
-  min_conditions: 5  # 最少满足条件数（共7个），提高质量
-  direction_mode: "long_only"  # 只做多，做空全部亏损
+  min_conditions: 5       # 正常方向最少满足条件数
+  min_conditions_strict: 6 # 反方向最少满足条件数（更强过滤）
+  direction_mode: "long_only"  # long_only=倾向做多但强信号可做空, both=双向, short_only=倾向做空
 
 # ADX 趋势强度过滤
 adx:

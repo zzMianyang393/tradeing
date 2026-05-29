@@ -27,6 +27,8 @@ class SignalGenerator:
         if config is None:
             config = {}
         self.direction_mode = config.get("rules", {}).get("direction_mode", "both")
+        self.min_conditions = config.get("rules", {}).get("min_conditions", 4)
+        self.min_conditions_strict = config.get("rules", {}).get("min_conditions_strict", 6)
         self.adx_threshold = config.get("adx", {}).get("threshold", 20)
 
     def generate(self, df: pd.DataFrame) -> Optional[Signal]:
@@ -51,12 +53,14 @@ class SignalGenerator:
             elif price < ema_slow * 0.995:
                 trend = "bearish"
 
-        # 做多条件（4/7）
-        if self.direction_mode != "short_only" and trend != "bearish":
+        # 做多条件
+        if trend != "bearish":
             long_conditions = self._check_long_conditions(latest, prev, df)
             long_score = sum(long_conditions.values())
             total = len(long_conditions)
-            if long_score >= 4:
+            # long_only模式下正常阈值；short_only模式下需更强信号
+            long_threshold = self.min_conditions_strict if self.direction_mode == "short_only" else self.min_conditions
+            if long_score >= long_threshold:
                 strength = long_score / total
                 reasons = [k for k, v in long_conditions.items() if v]
                 return Signal(
@@ -66,12 +70,14 @@ class SignalGenerator:
                     reason=f"趋势做多({long_score}/{total}): {', '.join(reasons)}",
                 )
 
-        # 做空条件（4/6）
-        if self.direction_mode != "long_only" and trend != "bullish":
+        # 做空条件
+        if trend != "bullish":
             short_conditions = self._check_short_conditions(latest, prev, df)
             short_score = sum(short_conditions.values())
             total = len(short_conditions)
-            if short_score >= 4:
+            # short_only模式下正常阈值；long_only模式下需更强信号
+            short_threshold = self.min_conditions_strict if self.direction_mode == "long_only" else self.min_conditions
+            if short_score >= short_threshold:
                 strength = short_score / total
                 reasons = [k for k, v in short_conditions.items() if v]
                 return Signal(
