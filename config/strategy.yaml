@@ -36,7 +36,7 @@ indicators:
 
 # 规则信号
 rules:
-  min_conditions: 3  # 最少满足条件数（共6个）
+  min_conditions: 4  # 最少满足条件数（共7个）
   direction_mode: "both"  # both / long_only / short_only
 
 # ADX 趋势强度过滤
@@ -51,7 +51,7 @@ ml:
   train_days: 90           # 训练数据天数
   retrain_interval: 604800 # 重新训练间隔（秒，7天）
   predict_horizon: 4       # 预测未来N根K线
-  confidence_threshold: 0.6 # 置信度阈值
+  confidence_threshold: 0.55 # 置信度阈值（回测最优）
   min_expected_return: 0.001 # 至少预测+0.1%净收益才通过
   min_win_prob: 0.55       # 至少55%胜率才通过
   take_profit_capture: 0.8 # 预测幅度的80%作为动态止盈参考
@@ -70,8 +70,8 @@ risk:
 
 # 杠杆设置 — 程序根据信号强度在min~max之间动态选择
 leverage:
-  min: 5
-  max: 50
+  min: 10
+  max: 10  # 回测最优固定10x
   signal_thresholds:
     strong: 0.8    # 信号强度>0.8 → 接近max
     medium: 0.6    # 信号强度>0.6 → 中间值
@@ -79,15 +79,15 @@ leverage:
 
 # 止损策略
 stop_loss:
-  atr_multiplier: 1.0
+  atr_multiplier: 1.5  # 回测最优1.5倍ATR
   max_pct: 0.008             # 最大止损 0.8%
-  fixed_pct: 0.008           # 固定止损 0.8%
+  fixed_pct: 0               # 0=使用ATR动态止损
   trailing_activate: 0.003   # 盈利0.3%后激活追踪止损
   trailing_callback: 0.005   # 追踪回撤0.5%平仓
 
 # 止盈策略
 take_profit:
   risk_reward_ratio: 0.625   # RR=1:0.625 → TP=0.5% when SL=0.8%
-  fixed_pct: 0.005           # 固定止盈 0.5% (R:R = 1:0.625)
+  fixed_pct: 0               # 0=使用ATR动态止盈
   partial_close_pct: 0.5     # 盈利目标达50%时平一半
   partial_close_trigger: 0.0  # 禁用部分止盈
