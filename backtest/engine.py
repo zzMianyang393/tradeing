@@ -31,6 +31,9 @@ class BacktestEngine:
 
         self.current_positions: dict[str, dict] = {}
         self.trade_log: list[dict] = []
+        self.last_close_bar: dict[str, int] = {}  # 每个币种上次平仓的bar index
+        self.cooldown_bars = 4  # 平仓后冷却4根K线（1小时）
+        self.current_bar_index = 0
 
     def run(
         self,
@@ -70,11 +73,12 @@ class BacktestEngine:
                 current_ts = 0
             current_time = datetime.utcfromtimestamp(current_ts / 1000) if current_ts else datetime.utcnow()
 
-            # 获取当前高时间框架趋势（用15m数据模拟）
-            htf_trend = self._get_htf_trend_from_15m(window)
+            # 重采样15m为1h，用1h EMA判断趋势
+            htf_trend = self._get_htf_trend(window)
 
+            self.current_bar_index = i
             self._check_positions(symbol, current_price, current, current_time)
-            self._check_signals(symbol, window, current_price, current_time, htf_trend)
+            self._check_signals(symbol, window, current_price, current_time, htf_trend, i)
 
         self._close_all_positions(symbol, df.iloc[-1], df.index[-1])
 
@@ -100,42 +104,41 @@ class BacktestEngine:
         combined_stats["trades"] = self.trade_log
         return combined_stats
 
-    def _get_htf_trend(self, htf_df: pd.DataFrame, current_time: datetime) -> str:
-        """获取高时间框架趋势方向（用15m数据模拟4h趋势）"""
-        if htf_df is None or htf_df.empty:
+    def _get_htf_trend(self, window_15m: pd.DataFrame) -> str:
+        """将15m数据重采样为1h，用1h EMA判断趋势方向"""
+        if window_15m is None or len(window_15m) < 240:  # 至少40根1h K线
             return "neutral"
-        
-        # 取最近16根K线（=4小时）
-        recent = htf_df.tail(16)
-        if len(recent) < 16:
-            return "neutral"
-        
-        ema_slow = recent.iloc[-1].get("ema_slow", 0)
-        price = recent.iloc[-1].get("close", 0)
-        
-        if ema_slow > 0:
-            if price < ema_slow * 0.99:
-                return "bearish"
-            elif price > ema_slow * 1.01:
-                return "bullish"
-        
-        return "neutral"
 
-    def _get_htf_trend_from_15m(self, window: pd.DataFrame) -> str:
-        """用15m数据的最近16根K线模拟4h趋势"""
-        if window is None or len(window) < 16:
+        # 重采样15m -> 1h (每4根15m合成1根1h)
+        tmp = window_15m[["open", "high", "low", "close", "volume"]].copy()
+        if "timestamp" in window_15m.columns:
+            tmp.index = pd.to_datetime(window_15m["timestamp"], unit="ms")
+        else:
+            tmp.index = window_15m.index
+
+        df_1h = tmp.resample("1h").agg({
+            "open": "first", "high": "max", "low": "min",
+            "close": "last", "volume": "sum",
+        }).dropna()
+
+        if len(df_1h) < 60:
             return "neutral"
-        
-        recent = window.tail(16)
-        ema_slow = recent.iloc[-1].get("ema_slow", 0)
-        price = recent.iloc[-1].get("close", 0)
-        
-        if ema_slow > 0:
-            if price < ema_slow * 0.99:
-                return "bearish"
-            elif price > ema_slow * 1.01:
-                return "bullish"
-        
+
+        close = df_1h["close"]
+        ema9 = close.ewm(span=9, adjust=False).mean()
+        ema21 = close.ewm(span=21, adjust=False).mean()
+        ema55 = close.ewm(span=55, adjust=False).mean()
+
+        ef = ema9.iloc[-1]
+        em = ema21.iloc[-1]
+        es = ema55.iloc[-1]
+        price = close.iloc[-1]
+
+        if ef > em > es and price > es:
+            return "bullish"
+        if ef < em < es and price < es:
+            return "bearish"
+
         return "neutral"
 
     def _check_positions(
@@ -145,35 +148,47 @@ class BacktestEngine:
             return
 
         pos = self.current_positions[symbol]
+        candle_high = float(row["high"])
+        candle_low = float(row["low"])
 
-        if self.stop_loss_mgr.check_stop_hit(price, pos["stop_loss"], pos["direction"]):
-            self._close_position(symbol, price, "止损", time)
+        # 检查止损：用K线的最低/最高价（而非收盘价）
+        if pos["direction"] == "long":
+            hit_sl = candle_low <= pos["stop_loss"]
+        else:
+            hit_sl = candle_high >= pos["stop_loss"]
+
+        if hit_sl:
+            # 以止损价成交（而非收盘价）
+            self._close_position(symbol, pos["stop_loss"], "止损", time)
             return
 
+        # 追踪止损
         new_stop = self.stop_loss_mgr.should_move_stop(
             pos["entry_price"], price, pos["stop_loss"], pos["direction"]
         )
         if new_stop is not None:
             pos["stop_loss"] = new_stop
 
-        should_tp, _ = self.take_profit_mgr.should_take_profit(
-            price, pos["entry_price"], pos["direction"]
-        )
-        if should_tp and not pos.get("partial_closed"):
-            self._close_position(symbol, price, "部分止盈", time, pos["size"] * 0.5)
-            pos["partial_closed"] = True
+        # 检查止盈：用K线的最高/最低价
+        if pos["direction"] == "long":
+            hit_tp = candle_high >= pos["take_profit"]
+        else:
+            hit_tp = candle_low <= pos["take_profit"]
 
-        if self.take_profit_mgr.should_full_close(
-            price, pos["take_profit"], pos["direction"]
-        ):
-            self._close_position(symbol, price, "止盈", time)
+        if hit_tp and not pos.get("partial_closed"):
+            self._close_position(symbol, pos["take_profit"], "止盈", time)
             return
 
     def _check_signals(
         self, symbol: str, df: pd.DataFrame, price: float, time: datetime,
-        htf_trend: str = None,
+        htf_trend: str = None, bar_index: int = 0,
     ):
         if symbol in self.current_positions:
+            return
+
+        # 冷却期检查：平仓后等待N根K线再开新仓
+        last_close = self.last_close_bar.get(symbol, -999)
+        if bar_index - last_close < self.cooldown_bars:
             return
 
         can_open, reason = self.position_sizer.can_open_position(
@@ -225,6 +240,7 @@ class BacktestEngine:
         win_rate = stats.get("win_rate")
         avg_win = stats.get("avg_win")
         avg_loss = stats.get("avg_loss")
+        total_trades = stats.get("total_trades", 0)
 
         position = self.position_sizer.calculate_position(
             balance=self.account.balance,
@@ -235,6 +251,7 @@ class BacktestEngine:
             win_rate=win_rate,
             avg_win=avg_win,
             avg_loss=avg_loss,
+            total_trades=total_trades,
         )
 
         if position.amount_usdt <= 0:
@@ -248,6 +265,7 @@ class BacktestEngine:
             "stop_loss": sl.stop_price,
             "take_profit": tp.target_price,
             "open_time": time,
+            "open_bar": self.current_bar_index,
             "signal": signal,
         }
 
@@ -339,6 +357,7 @@ class BacktestEngine:
 
         if partial_size is None:
             del self.current_positions[symbol]
+            self.last_close_bar[symbol] = self.current_bar_index
 
         emoji = "+" if pnl >= 0 else ""
         logger.debug(

@@ -424,12 +424,18 @@ def _try_open(executor, strategy, position_sizer, stop_loss_mgr,
 
     # CRITICAL #3: 用PositionSizer计算仓位，而不是固定50%
     entry_price_for_sizer = entry_price
+
+    # 获取历史交易统计
+    history = storage.load_trades()
+    total_trades_count = len(history) if history else 0
+
     pos_size = position_sizer.calculate_position(
         balance=available,
         entry_price=entry_price_for_sizer,
         stop_distance_pct=fixed_sl_pct,
         signal_strength=signal.strength if hasattr(signal, 'strength') else 0.5,
         current_positions=0,
+        total_trades=total_trades_count,
     )
     amount_usdt = pos_size.amount_usdt if pos_size.amount_usdt > 0 else available * 0.50
     leverage = pos_size.leverage if pos_size.leverage > 0 else leverage  # 用动态杠杆

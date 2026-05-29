@@ -36,11 +36,12 @@ class SignalGenerator:
         latest = df.iloc[-1]
         prev = df.iloc[-2]
 
+        # ADX过滤：宽松阈值，只过滤极度震荡
         adx = latest.get("adx", 0)
         if adx < self.adx_threshold:
             return None
 
-        # 趋势过滤：价格在EMA慢线之上只做多，之下只做空
+        # 趋势方向（宽松）
         ema_slow = latest.get("ema_slow", 0)
         price = latest.get("close", 0)
         trend = "neutral"
@@ -50,12 +51,12 @@ class SignalGenerator:
             elif price < ema_slow * 0.995:
                 trend = "bearish"
 
-        # 先检查做多（对称条件：5/7）
+        # 做多条件（4/7）
         if self.direction_mode != "short_only" and trend != "bearish":
             long_conditions = self._check_long_conditions(latest, prev, df)
             long_score = sum(long_conditions.values())
             total = len(long_conditions)
-            if long_score >= 5:
+            if long_score >= 4:
                 strength = long_score / total
                 reasons = [k for k, v in long_conditions.items() if v]
                 return Signal(
@@ -65,12 +66,12 @@ class SignalGenerator:
                     reason=f"趋势做多({long_score}/{total}): {', '.join(reasons)}",
                 )
 
-        # 再检查做空
+        # 做空条件（4/6）
         if self.direction_mode != "long_only" and trend != "bullish":
             short_conditions = self._check_short_conditions(latest, prev, df)
             short_score = sum(short_conditions.values())
             total = len(short_conditions)
-            if short_score >= 5:
+            if short_score >= 4:
                 strength = short_score / total
                 reasons = [k for k, v in short_conditions.items() if v]
                 return Signal(
@@ -95,12 +96,12 @@ class SignalGenerator:
         conditions["EMA多头排列"] = ema_fast > ema_medium > ema_slow
 
         # 条件2: 价格必须在慢线之上（趋势确认）
-        conditions["价格在慢线之上"] = price > ema_slow * 1.01 if ema_slow > 0 else False
+        conditions["价格在慢线之上"] = price > ema_slow * 1.005 if ema_slow > 0 else False
 
         # 条件3: 价格回踩EMA（买入时机）
         if ema_fast > 0:
             ema9_dist = (price - ema_fast) / ema_fast
-            conditions["价格回踩EMA"] = -0.003 <= ema9_dist <= 0.003
+            conditions["价格回踩EMA"] = -0.008 <= ema9_dist <= 0.008
         else:
             conditions["价格回踩EMA"] = False
 
@@ -136,7 +137,7 @@ class SignalGenerator:
         price = latest.get("close", 0)
         if ema_fast > 0:
             ema9_dist = (price - ema_fast) / ema_fast
-            conditions["价格反弹EMA"] = -0.005 <= ema9_dist <= 0.005
+            conditions["价格反弹EMA"] = -0.008 <= ema9_dist <= 0.008
         else:
             conditions["价格反弹EMA"] = False
 

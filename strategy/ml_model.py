@@ -278,12 +278,38 @@ class MLModel:
             "max_up_return",
             "max_down_return",
         ):
-            reg = self._regressor()
             label_source = (
                 outcome_labels if target in outcome_labels.columns else advisor_labels
             )
-            reg.fit(features, label_source[target])
+            valid_reg_mask = label_source[target].notna()
+            if valid_reg_mask.sum() < 100:
+                continue
+
+            reg_features = features[valid_reg_mask]
+            reg_labels = label_source.loc[valid_reg_mask, target]
+
+            # 时序交叉验证回归器
+            reg_scores = []
+            for train_idx, val_idx in tscv.split(reg_features):
+                x_train = reg_features.iloc[train_idx]
+                y_train = reg_labels.iloc[train_idx]
+                x_val = reg_features.iloc[val_idx]
+                y_val = reg_labels.iloc[val_idx]
+
+                reg = self._regressor()
+                reg.fit(x_train, y_train)
+                score = reg.score(x_val, y_val)
+                reg_scores.append(score)
+
+            # 用最后一折的模型（最近的数据）
+            reg = self._regressor()
+            reg.fit(reg_features, reg_labels)
             self.return_models[target] = reg
+
+            avg_score = np.mean(reg_scores) if reg_scores else 0
+            logger.debug(
+                f"Regressor {target}: R²={avg_score:.4f} (+/- {np.std(reg_scores):.4f})"
+            )
 
         self._save_model()
 

@@ -21,12 +21,12 @@ class PositionSizer:
         risk_cfg = config.get("risk", {})
         lev_cfg = config.get("leverage", {})
 
-        self.max_position_pct = risk_cfg.get("max_position_pct", 0.02)
+        self.max_position_pct = risk_cfg.get("max_position_pct", 0.03)
         self.max_concurrent = risk_cfg.get("max_concurrent_positions", 5)
-        self.max_daily_loss = risk_cfg.get("max_daily_loss", 0.05)
+        self.max_daily_loss = risk_cfg.get("max_daily_loss", 0.10)
 
-        self.min_leverage = lev_cfg.get("min", 3)
-        self.max_leverage = lev_cfg.get("max", 20)
+        self.min_leverage = lev_cfg.get("min", 5)
+        self.max_leverage = lev_cfg.get("max", 10)
         self.thresholds = lev_cfg.get("signal_thresholds", {
             "strong": 0.8,
             "medium": 0.6,
@@ -35,8 +35,9 @@ class PositionSizer:
 
         # 凯利公式参数
         self.kelly_fraction = risk_cfg.get("kelly_fraction", 0.5)  # 半凯利
-        self.min_position_pct = risk_cfg.get("min_position_pct", 0.05)
+        self.min_position_pct = risk_cfg.get("min_position_pct", 0.10)
         self.max_position_pct_cap = risk_cfg.get("max_position_pct_cap", 0.30)
+        self.min_trades_for_kelly = risk_cfg.get("min_trades_for_kelly", 20)
 
     def calculate_leverage(self, signal_strength: float) -> int:
         if signal_strength >= self.thresholds["strong"]:
@@ -89,6 +90,7 @@ class PositionSizer:
         win_rate: float = None,
         avg_win: float = None,
         avg_loss: float = None,
+        total_trades: int = 0,
     ) -> PositionSize:
         if current_positions >= self.max_concurrent:
             return PositionSize(0, 0, 0, 0)
@@ -101,15 +103,24 @@ class PositionSizer:
         if stop_distance_pct <= 0:
             stop_distance_pct = 0.01
 
-        # 如果有历史交易数据，用凯利公式计算仓位
-        if win_rate is not None and avg_win is not None and avg_loss is not None:
+        # 凯利公式需要足够的历史数据，否则用默认仓位
+        use_kelly = (
+            win_rate is not None
+            and avg_win is not None
+            and avg_loss is not None
+            and total_trades >= self.min_trades_for_kelly
+        )
+
+        if use_kelly:
             kelly_pct = self.kelly_criterion(win_rate, avg_win, avg_loss)
             amount_usdt = balance * kelly_pct
         else:
-            # 默认仓位：25%资金，上限5U
-            amount_usdt = min(balance * 0.25, 5.0)
-        
-        amount_usdt = max(amount_usdt, 1.0)  # 最少1U
+            # 默认仓位：30%资金，最少3U
+            amount_usdt = max(balance * 0.30, 3.0)
+
+        # 仓位限制
+        amount_usdt = max(amount_usdt, 3.0)  # 最少3U
+        amount_usdt = min(amount_usdt, balance * self.max_position_pct_cap)
 
         if amount_usdt > balance:
             return PositionSize(0, 0, 0, 0)

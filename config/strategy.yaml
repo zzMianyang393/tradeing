@@ -36,13 +36,13 @@ indicators:
 
 # 规则信号
 rules:
-  min_conditions: 4  # 最少满足条件数（共7个）
-  direction_mode: "both"  # both / long_only / short_only
+  min_conditions: 5  # 最少满足条件数（共7个），提高质量
+  direction_mode: "long_only"  # 只做多，做空全部亏损
 
 # ADX 趋势强度过滤
 adx:
   period: 14
-  threshold: 15  # ADX < 15 视为震荡市场，不交易
+  threshold: 20  # ADX < 20 视为震荡市场，不交易
 
 # ML 模型
 ml:
@@ -51,7 +51,7 @@ ml:
   train_days: 90           # 训练数据天数
   retrain_interval: 604800 # 重新训练间隔（秒，7天）
   predict_horizon: 4       # 预测未来N根K线
-  confidence_threshold: 0.55 # 置信度阈值（回测最优）
+  confidence_threshold: 0.5 # 置信度阈值
   min_expected_return: 0.001 # 至少预测+0.1%净收益才通过
   min_win_prob: 0.55       # 至少55%胜率才通过
   take_profit_capture: 0.8 # 预测幅度的80%作为动态止盈参考
@@ -63,15 +63,19 @@ ml:
 
 # 风控参数
 risk:
-  max_position_pct: 0.02       # 单笔最大亏损占总资金比例
-  max_concurrent_positions: 5  # 最大同时持仓数
+  max_position_pct: 0.03       # 单笔最大亏损占总资金比例（3%）
+  max_concurrent_positions: 3  # 最大同时持仓数
   max_daily_loss: 0.10         # 日最大亏损比例(10%)
-  min_risk_reward: 2.0         # 最小盈亏比
+  min_risk_reward: 1.5         # 最小盈亏比
+  kelly_fraction: 0.5          # 凯利分数（半凯利）
+  min_position_pct: 0.20       # 最小仓位比例（20%）
+  max_position_pct_cap: 0.40   # 最大仓位比例（40%）
+  min_trades_for_kelly: 10     # 凯利公式最少交易数（warmup）
 
 # 杠杆设置 — 程序根据信号强度在min~max之间动态选择
 leverage:
-  min: 10
-  max: 10  # 回测最优固定10x
+  min: 5
+  max: 10
   signal_thresholds:
     strong: 0.8    # 信号强度>0.8 → 接近max
     medium: 0.6    # 信号强度>0.6 → 中间值
@@ -79,15 +83,15 @@ leverage:
 
 # 止损策略
 stop_loss:
-  atr_multiplier: 1.5  # 回测最优1.5倍ATR
-  max_pct: 0.008             # 最大止损 0.8%
-  fixed_pct: 0               # 0=使用ATR动态止损
-  trailing_activate: 0.003   # 盈利0.3%后激活追踪止损
-  trailing_callback: 0.005   # 追踪回撤0.5%平仓
+  atr_multiplier: 2.0
+  max_pct: 0.015             # 最大止损 1.5%
+  fixed_pct: 0.015           # 固定止损 1.5%
+  trailing_activate: 0.05    # 禁用追踪止损
+  trailing_callback: 0.05    # 禁用追踪止损
 
 # 止盈策略
 take_profit:
-  risk_reward_ratio: 0.625   # RR=1:0.625 → TP=0.5% when SL=0.8%
-  fixed_pct: 0               # 0=使用ATR动态止盈
-  partial_close_pct: 0.5     # 盈利目标达50%时平一半
+  risk_reward_ratio: 1.5     # RR=1:1.5 → TP=2.25% when SL=1.5%
+  fixed_pct: 0.0225          # 固定止盈 2.25%
+  partial_close_pct: 0.5
   partial_close_trigger: 0.0  # 禁用部分止盈
