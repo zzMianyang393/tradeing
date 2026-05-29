@@ -40,12 +40,22 @@ class SignalGenerator:
         if adx < self.adx_threshold:
             return None
 
-        # 先检查做多（要求更严格：7/8条件）
-        if self.direction_mode != "short_only":
+        # 趋势过滤：价格在EMA慢线之上只做多，之下只做空
+        ema_slow = latest.get("ema_slow", 0)
+        price = latest.get("close", 0)
+        trend = "neutral"
+        if ema_slow > 0:
+            if price > ema_slow * 1.005:
+                trend = "bullish"
+            elif price < ema_slow * 0.995:
+                trend = "bearish"
+
+        # 先检查做多（对称条件：5/7）
+        if self.direction_mode != "short_only" and trend != "bearish":
             long_conditions = self._check_long_conditions(latest, prev, df)
             long_score = sum(long_conditions.values())
             total = len(long_conditions)
-            if long_score >= 7:
+            if long_score >= 5:
                 strength = long_score / total
                 reasons = [k for k, v in long_conditions.items() if v]
                 return Signal(
@@ -56,11 +66,11 @@ class SignalGenerator:
                 )
 
         # 再检查做空
-        if self.direction_mode != "long_only":
+        if self.direction_mode != "long_only" and trend != "bullish":
             short_conditions = self._check_short_conditions(latest, prev, df)
             short_score = sum(short_conditions.values())
             total = len(short_conditions)
-            if short_score >= 4:
+            if short_score >= 5:
                 strength = short_score / total
                 reasons = [k for k, v in short_conditions.items() if v]
                 return Signal(
@@ -111,10 +121,6 @@ class SignalGenerator:
         adx_dmp = latest.get("adx_dmp", 0)
         adx_dmn = latest.get("adx_dmn", 0)
         conditions["DI确认"] = adx_dmp > adx_dmn
-
-        # 条件8: ADX趋势强度
-        adx = latest.get("adx", 0)
-        conditions["ADX趋势"] = adx > 20
 
         return conditions
 

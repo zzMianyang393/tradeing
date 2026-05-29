@@ -39,6 +39,9 @@ class BacktestEngine:
         train_data: Optional[pd.DataFrame] = None,
         htf_data: Optional[pd.DataFrame] = None,
     ) -> dict:
+        # 每个币种回测前重置每日盈亏计数器
+        self.account.daily_pnl = 0.0
+
         if train_data is not None and not train_data.empty:
             self.strategy.train_ml({symbol: train_data}, force=False)
 
@@ -297,9 +300,10 @@ class BacktestEngine:
         pnl = close_size * pnl_pct
 
         # 手续费: 开仓 + 平仓，都按名义价值(保证金*杠杆)收
+        fee_rate = self.config.get("general", {}).get("fee_rate", 0.0005)
         notional = close_size * pos["leverage"]
-        open_fee = notional * 0.0005   # 开仓手续费
-        close_fee = notional * 0.0005  # 平仓手续费
+        open_fee = notional * fee_rate
+        close_fee = notional * fee_rate
         pnl -= (open_fee + close_fee)
 
         self.account.balance += pnl

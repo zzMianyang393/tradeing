@@ -32,6 +32,10 @@ class TechnicalIndicators:
         if len(df) < 60:
             return df
 
+        # 如果指标已计算过，跳过（避免回测循环中重复计算）
+        if "ema_fast" in df.columns and "adx" in df.columns:
+            return df
+
         df = df.copy()
         close = df["close"]
         high = df["high"]
