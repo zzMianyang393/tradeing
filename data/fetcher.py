@@ -70,11 +70,18 @@ class DataFetcher:
 
         all_data = []
         current = start_ts
+        empty_retries = 0
 
         while current < end_ts:
             batch = self.fetch_ohlcv(symbol, timeframe, since=current, limit=300)
             if batch.empty:
+                empty_retries += 1
+                if empty_retries <= 2:
+                    self.exchange = ccxt.okx({"enableRateLimit": True})
+                    time.sleep(1)
+                    continue
                 break
+            empty_retries = 0
 
             all_data.append(batch)
             last_ts = batch["timestamp"].max()

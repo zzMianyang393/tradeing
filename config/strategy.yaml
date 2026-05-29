@@ -36,8 +36,8 @@ indicators:
 
 # 规则信号
 rules:
-  min_conditions: 4  # 最少满足条件数（共7个）
-  direction_mode: "both"  # 多空都做
+  min_conditions: 3  # 最少满足条件数（共6个）
+  direction_mode: "both"  # both / long_only / short_only
 
 # ADX 趋势强度过滤
 adx:
@@ -46,10 +46,19 @@ adx:
 
 # ML 模型
 ml:
+  enabled: false           # false = 纯规则交易；true = ML只作为过滤器
+  mode: "advisor"          # filter=只过滤；advisor=预测幅度并参与TP/SL和持仓管理
   train_days: 90           # 训练数据天数
   retrain_interval: 604800 # 重新训练间隔（秒，7天）
   predict_horizon: 4       # 预测未来N根K线
-  confidence_threshold: 0.55 # 置信度阈值（回测最优）
+  confidence_threshold: 0.6 # 置信度阈值
+  min_expected_return: 0.001 # 至少预测+0.1%净收益才通过
+  min_win_prob: 0.55       # 至少55%胜率才通过
+  take_profit_capture: 0.8 # 预测幅度的80%作为动态止盈参考
+  reversal_exit_prob: 0.55 # 持仓中反向概率超过该值且有利润时平仓
+  protect_profit_pct: 0.003 # 盈利超过0.3%但趋势走弱时保护到保本
+  fee_rate: 0.0005         # 单边taker手续费估算
+  slippage: 0.001          # 单边滑点估算
   model_path: "data/ml_model.pkl"
 
 # 风控参数
@@ -59,22 +68,26 @@ risk:
   max_daily_loss: 0.10         # 日最大亏损比例(10%)
   min_risk_reward: 2.0         # 最小盈亏比
 
-# 杠杆设置 — 回测最优: 10x
+# 杠杆设置 — 程序根据信号强度在min~max之间动态选择
 leverage:
-  min: 10
-  max: 10
+  min: 5
+  max: 50
+  signal_thresholds:
+    strong: 0.8    # 信号强度>0.8 → 接近max
+    medium: 0.6    # 信号强度>0.6 → 中间值
+    weak: 0.4      # 信号强度<0.4 → 接近min
 
-# 止损策略 — 回测最优: 1.5倍ATR
+# 止损策略
 stop_loss:
-  atr_multiplier: 1.5
-  max_pct: 0.015             # 最大止损 1.5%
-  fixed_pct: 0               # 0=使用ATR动态止损
-  trailing_activate: 0.005   # 盈利0.5%后激活追踪止损
-  trailing_callback: 0.003   # 回撤0.3%触发
+  atr_multiplier: 1.0
+  max_pct: 0.008             # 最大止损 0.8%
+  fixed_pct: 0.008           # 固定止损 0.8%
+  trailing_activate: 0.003   # 盈利0.3%后激活追踪止损
+  trailing_callback: 0.005   # 追踪回撤0.5%平仓
 
-# 止盈策略 — 回测最优: 2.0倍ATR
+# 止盈策略
 take_profit:
-  risk_reward_ratio: 1.33    # TP/SL = 2.0/1.5 = 1.33
-  fixed_pct: 0               # 0=使用ATR动态止盈
-  partial_close_pct: 0.5     # 盈利达50%时平一半
-  partial_close_trigger: 0.0 # 不触发部分止盈(让利润奔跑)
+  risk_reward_ratio: 0.625   # RR=1:0.625 → TP=0.5% when SL=0.8%
+  fixed_pct: 0.005           # 固定止盈 0.5% (R:R = 1:0.625)
+  partial_close_pct: 0.5     # 盈利目标达50%时平一半
+  partial_close_trigger: 0.0  # 禁用部分止盈
