@@ -64,17 +64,19 @@ def cmd_backtest(args, config: dict):
 
     all_data = {}
     train_data = {}
-    htf_data = {}  # 高时间框架数据（4h）
+    htf_data = {}  # 高时间框架数据（1h）
+    htf4_data = {}  # 4小时数据
 
+    timeframe = config["general"]["timeframe"]
     csv_files = {
-        "BTC/USDT:USDT": "data/BTC_15m.csv",
-        "ETH/USDT:USDT": "data/ETH_15m.csv",
+        "BTC/USDT:USDT": f"data/BTC_{timeframe}.csv",
+        "ETH/USDT:USDT": f"data/ETH_{timeframe}.csv",
     }
 
     for symbol in symbols:
         if symbol in csv_files and Path(csv_files[symbol]).exists():
             df = pd.read_csv(csv_files[symbol])
-            logger.info(f"{symbol}: 从CSV加载 {len(df)} 条K线")
+            logger.info(f"{symbol}: 从CSV加载 {len(df)} 条{timeframe} K线")
         else:
             df = fetcher.sync_klines(symbol, config["general"]["timeframe"], days=days)
 
@@ -82,12 +84,21 @@ def cmd_backtest(args, config: dict):
             logger.warning(f"{symbol} 数据不足，跳过")
             continue
 
-        # 获取4小时数据用于趋势过滤
+        # 获取1小时数据用于趋势确认
         try:
-            htf_df = fetcher.sync_klines(symbol, "4h", days=days)
-            if not htf_df.empty and len(htf_df) > 20:
+            htf_df = fetcher.sync_klines(symbol, "1h", days=days)
+            if not htf_df.empty and len(htf_df) > 60:
                 htf_data[symbol] = htf_df
-                logger.info(f"{symbol}: 4h数据 {len(htf_df)} 条")
+                logger.info(f"{symbol}: 1h数据 {len(htf_df)} 条")
+        except Exception as e:
+            logger.warning(f"{symbol}: 获取1h数据失败: {e}")
+
+        # 获取4小时数据用于大趋势判断
+        try:
+            htf4_df = fetcher.sync_klines(symbol, "4h", days=days)
+            if not htf4_df.empty and len(htf4_df) > 20:
+                htf4_data[symbol] = htf4_df
+                logger.info(f"{symbol}: 4h数据 {len(htf4_df)} 条")
         except Exception as e:
             logger.warning(f"{symbol}: 获取4h数据失败: {e}")
 
@@ -101,7 +112,7 @@ def cmd_backtest(args, config: dict):
         return
 
     engine = BacktestEngine(config)
-    stats = engine.run_multi(all_data, train_data, htf_data)
+    stats = engine.run_multi(all_data, train_data, htf_data, htf4_data)
 
     analyzer = BacktestAnalyzer(config["general"]["initial_capital"])
     if "trades" in stats and stats["trades"]:

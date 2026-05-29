@@ -32,7 +32,7 @@ class BacktestEngine:
         self.current_positions: dict[str, dict] = {}
         self.trade_log: list[dict] = []
         self.last_close_bar: dict[str, int] = {}  # 每个币种上次平仓的bar index
-        self.cooldown_bars = 4  # 平仓后冷却4根K线（1小时）
+        self.cooldown_bars = 8  # 平仓后冷却8根K线（2小时）
         self.current_bar_index = 0
 
     def run(
@@ -41,6 +41,7 @@ class BacktestEngine:
         df: pd.DataFrame,
         train_data: Optional[pd.DataFrame] = None,
         htf_data: Optional[pd.DataFrame] = None,
+        htf4_data: Optional[pd.DataFrame] = None,
     ) -> dict:
         # 每个币种回测前重置每日盈亏计数器
         self.account.daily_pnl = 0.0
@@ -52,14 +53,23 @@ class BacktestEngine:
         if df.empty or len(df) < 60:
             return {"error": "数据不足"}
 
-        # 计算高时间框架指标（用于趋势过滤）
-        htf_indicators = None
+        # 计算1小时指标（用于趋势过滤）
+        htf_1h = None
         if htf_data is not None and not htf_data.empty:
-            htf_df = self.indicators.calculate(htf_data)
-            if not htf_df.empty and len(htf_df) > 20:
-                htf_indicators = htf_df
+            htf_1h = self.indicators.calculate(htf_data)
+            if htf_1h.empty or len(htf_1h) < 20:
+                htf_1h = None
 
-        logger.info(f"回测 {symbol}: {len(df)} 根K线")
+        # 计算4小时指标（用于大趋势判断）
+        htf_4h = None
+        if htf4_data is not None and not htf4_data.empty:
+            htf_4h = self.indicators.calculate(htf4_data)
+            if htf_4h.empty or len(htf_4h) < 10:
+                htf_4h = None
+
+        logger.info(f"回测 {symbol}: {len(df)} 根K线"
+                     + (f", 1h={len(htf_1h)}条" if htf_1h is not None else "")
+                     + (f", 4h={len(htf_4h)}条" if htf_4h is not None else ""))
 
         for i in range(60, len(df)):
             window = df.iloc[:i + 1]
@@ -73,12 +83,20 @@ class BacktestEngine:
                 current_ts = 0
             current_time = datetime.utcfromtimestamp(current_ts / 1000) if current_ts else datetime.utcnow()
 
-            # 重采样15m为1h，用1h EMA判断趋势
-            htf_trend = self._get_htf_trend(window)
+            # 用实际1h数据判断趋势（优先），否则重采样15m
+            if htf_1h is not None:
+                htf_trend = self._get_htf_trend_from_data(htf_1h, current_ts)
+            else:
+                htf_trend = self._get_htf_trend(window)
+
+            # 用4h数据判断大趋势
+            htf4_trend = "neutral"
+            if htf_4h is not None:
+                htf4_trend = self._get_htf_trend_from_data(htf_4h, current_ts)
 
             self.current_bar_index = i
             self._check_positions(symbol, current_price, current, current_time)
-            self._check_signals(symbol, window, current_price, current_time, htf_trend, i)
+            self._check_signals(symbol, window, current_price, current_time, htf_trend, i, htf4_trend)
 
         self._close_all_positions(symbol, df.iloc[-1], df.index[-1])
 
@@ -92,17 +110,49 @@ class BacktestEngine:
         data: dict[str, pd.DataFrame],
         train_data: Optional[dict[str, pd.DataFrame]] = None,
         htf_data: Optional[dict[str, pd.DataFrame]] = None,
+        htf4_data: Optional[dict[str, pd.DataFrame]] = None,
     ) -> dict:
         all_stats = {}
         for symbol, df in data.items():
             train = train_data.get(symbol) if train_data else None
             htf = htf_data.get(symbol) if htf_data else None
-            all_stats[symbol] = self.run(symbol, df, train, htf)
+            htf4 = htf4_data.get(symbol) if htf4_data else None
+            all_stats[symbol] = self.run(symbol, df, train, htf, htf4)
 
         combined_stats = self.account.get_stats()
         combined_stats["by_symbol"] = all_stats
         combined_stats["trades"] = self.trade_log
         return combined_stats
+
+    def _get_htf_trend_from_data(self, htf_df: pd.DataFrame, current_ts: int) -> str:
+        """用实际1h/4h数据判断当前时间的趋势方向"""
+        if htf_df is None or htf_df.empty or len(htf_df) < 60:
+            return "neutral"
+
+        # 取到当前时间为止的数据
+        if current_ts and "timestamp" in htf_df.columns:
+            mask = htf_df["timestamp"] <= current_ts
+            available = htf_df[mask]
+            if len(available) < 30:
+                return "neutral"
+        else:
+            available = htf_df
+
+        close = available["close"]
+        ema9 = close.ewm(span=9, adjust=False).mean()
+        ema21 = close.ewm(span=21, adjust=False).mean()
+        ema55 = close.ewm(span=55, adjust=False).mean()
+
+        ef = ema9.iloc[-1]
+        em = ema21.iloc[-1]
+        es = ema55.iloc[-1]
+        price = close.iloc[-1]
+
+        if ef > em > es and price > es:
+            return "bullish"
+        if ef < em < es and price < es:
+            return "bearish"
+        return "neutral"
 
     def _get_htf_trend(self, window_15m: pd.DataFrame) -> str:
         """将15m数据重采样为1h，用1h EMA判断趋势方向"""
@@ -150,38 +200,94 @@ class BacktestEngine:
         pos = self.current_positions[symbol]
         candle_high = float(row["high"])
         candle_low = float(row["low"])
+        candle_open = float(row["open"])
 
-        # 检查止损：用K线的最低/最高价（而非收盘价）
+        # 检查止损和止盈
         if pos["direction"] == "long":
             hit_sl = candle_low <= pos["stop_loss"]
+            hit_tp = candle_high >= pos["take_profit"]
         else:
             hit_sl = candle_high >= pos["stop_loss"]
+            hit_tp = candle_low <= pos["take_profit"]
+
+        # 当同一根K线同时触及止损和止盈时，用开盘价方向判断先触及哪个
+        if hit_sl and hit_tp:
+            if pos["direction"] == "long":
+                # 做多：开盘价偏向止盈方向→先触TP（赢），偏向止损方向→先触SL（亏）
+                if candle_open >= pos["entry_price"]:
+                    self._close_position(symbol, pos["take_profit"], "止盈", time)
+                else:
+                    self._close_position(symbol, pos["stop_loss"], "止损", time)
+            else:
+                # 做空：开盘价偏向止盈方向→先触TP（赢），偏向止损方向→先触SL（亏）
+                if candle_open <= pos["entry_price"]:
+                    self._close_position(symbol, pos["take_profit"], "止盈", time)
+                else:
+                    self._close_position(symbol, pos["stop_loss"], "止损", time)
+            return
 
         if hit_sl:
-            # 以止损价成交（而非收盘价）
             self._close_position(symbol, pos["stop_loss"], "止损", time)
             return
 
-        # 追踪止损
-        new_stop = self.stop_loss_mgr.should_move_stop(
-            pos["entry_price"], price, pos["stop_loss"], pos["direction"]
-        )
-        if new_stop is not None:
-            pos["stop_loss"] = new_stop
+        # 保本止损：盈利超过breakeven_trigger时，将止损移至入场价
+        breakeven_trigger = self.config.get("stop_loss", {}).get("breakeven_trigger", 0)
+        if breakeven_trigger > 0:
+            if pos["direction"] == "long":
+                unrealized = (price - pos["entry_price"]) / pos["entry_price"]
+                if unrealized >= breakeven_trigger and pos["stop_loss"] < pos["entry_price"]:
+                    pos["stop_loss"] = pos["entry_price"]
+            else:
+                unrealized = (pos["entry_price"] - price) / pos["entry_price"]
+                if unrealized >= breakeven_trigger and pos["stop_loss"] > pos["entry_price"]:
+                    pos["stop_loss"] = pos["entry_price"]
 
-        # 检查止盈：用K线的最高/最低价
-        if pos["direction"] == "long":
-            hit_tp = candle_high >= pos["take_profit"]
-        else:
-            hit_tp = candle_low <= pos["take_profit"]
+        # 追踪止损（可配置仅对多头生效；callback=0时禁用）
+        trailing_callback = self.config.get("stop_loss", {}).get("trailing_callback", 0.012)
+        if trailing_callback > 0:
+            trailing_long_only = self.config.get("stop_loss", {}).get("trailing_long_only", False)
+            if not trailing_long_only or pos["direction"] == "long":
+                new_stop = self.stop_loss_mgr.should_move_stop(
+                    pos["entry_price"], price, pos["stop_loss"], pos["direction"]
+                )
+                if new_stop is not None:
+                    pos["stop_loss"] = new_stop
+
+        # 部分止盈：盈利达到partial_close_trigger时平仓50%
+        partial_trigger = self.config.get("take_profit", {}).get("partial_close_trigger", 0)
+        partial_pct = self.config.get("take_profit", {}).get("partial_close_pct", 0.5)
+        if partial_trigger > 0 and not pos.get("partial_closed"):
+            if pos["direction"] == "long":
+                unrealized = (price - pos["entry_price"]) / pos["entry_price"]
+            else:
+                unrealized = (pos["entry_price"] - price) / pos["entry_price"]
+            if unrealized >= partial_trigger:
+                partial_size = pos["size"] * partial_pct
+                self._close_position(symbol, price, "部分止盈", time, partial_size=partial_size)
+                pos["size"] -= partial_size
+                pos["partial_closed"] = True
+                # 将止损移至保本
+                pos["stop_loss"] = pos["entry_price"]
 
         if hit_tp and not pos.get("partial_closed"):
             self._close_position(symbol, pos["take_profit"], "止盈", time)
             return
 
+        # 时间止损：持仓超过max_holding_bars根K线且亏损时平仓
+        max_holding_bars = self.config.get("stop_loss", {}).get("max_holding_bars", 0)
+        if max_holding_bars > 0:
+            bars_held = self.current_bar_index - pos.get("open_bar", 0)
+            if bars_held >= max_holding_bars:
+                if pos["direction"] == "long":
+                    unrealized = (price - pos["entry_price"]) / pos["entry_price"]
+                else:
+                    unrealized = (pos["entry_price"] - price) / pos["entry_price"]
+                if unrealized < 0:
+                    self._close_position(symbol, price, "时间止损", time)
+
     def _check_signals(
         self, symbol: str, df: pd.DataFrame, price: float, time: datetime,
-        htf_trend: str = None, bar_index: int = 0,
+        htf_trend: str = None, bar_index: int = 0, htf4_trend: str = "neutral",
     ):
         if symbol in self.current_positions:
             return
@@ -203,37 +309,56 @@ class BacktestEngine:
         if signal is None:
             return
 
-        # 多时间框架过滤：只做顺势交易
+        # 多时间框架趋势偏差（软性）
         if htf_trend is not None:
-            if signal.direction == "short" and htf_trend == "bullish":
-                return  # 大趋势向上，不做空
             if signal.direction == "long" and htf_trend == "bearish":
-                return  # 大趋势向下，不做多
+                signal.strength *= 0.9  # 熊市做多：轻微惩罚
+            elif signal.direction == "short" and htf_trend == "bullish":
+                signal.strength *= 0.9  # 牛市做空：轻微惩罚
+            elif signal.direction == "long" and htf_trend == "bullish":
+                signal.strength = min(signal.strength * 1.1, 1.0)  # 牛市做多：加分
+            elif signal.direction == "short" and htf_trend == "bearish":
+                signal.strength = min(signal.strength * 1.1, 1.0)  # 熊市做空：加分
 
         row = df.iloc[-1]
 
         # 滑点模拟：开仓价格恶化
-        slippage = self.config.get("general", {}).get("slippage", 0.001)
+        slippage = self.config.get("fees", {}).get("slippage", 0.0005)
         if signal.direction == "long":
             entry_price = price * (1 + slippage)  # 做多买入价更高
         else:
             entry_price = price * (1 - slippage)  # 做空卖出价更低
 
-        fixed_sl_pct = self.config.get("stop_loss", {}).get("fixed_pct")
+        atr = float(row.get("atr", price * 0.01))
+
+        # 方向特定止损
+        sl_cfg = self.config.get("stop_loss", {})
+        if signal.direction == "short" and sl_cfg.get("fixed_pct_short"):
+            fixed_sl_pct = sl_cfg["fixed_pct_short"]
+        else:
+            fixed_sl_pct = sl_cfg.get("fixed_pct")
         if fixed_sl_pct is not None and fixed_sl_pct > 0:
-            sl_price = price * (1 - fixed_sl_pct) if signal.direction == "long" else price * (1 + fixed_sl_pct)
+            sl_price = entry_price * (1 - fixed_sl_pct) if signal.direction == "long" else entry_price * (1 + fixed_sl_pct)
             sl = StopLossResult(stop_price=round(sl_price, 8), stop_pct=fixed_sl_pct, method="FIXED")
         else:
-            atr = float(row.get("atr", price * 0.01))
-            sl = self.stop_loss_mgr.calculate_atr_stop(price, atr, signal.direction)
+            sl = self.stop_loss_mgr.calculate_atr_stop(entry_price, atr, signal.direction)
 
-        rr_ratio = self.config.get("take_profit", {}).get("risk_reward_ratio", 2.0)
-        fixed_tp_pct = self.config.get("take_profit", {}).get("fixed_pct")
-        if fixed_tp_pct is not None and fixed_tp_pct > 0:
-            tp_price = price * (1 + fixed_tp_pct) if signal.direction == "long" else price * (1 - fixed_tp_pct)
-            tp = TakeProfitResult(target_price=round(tp_price, 8), target_pct=fixed_tp_pct, method="FIXED")
+        # 方向特定止盈
+        tp_cfg = self.config.get("take_profit", {})
+        rr_ratio = tp_cfg.get("risk_reward_ratio", 2.0)
+        if signal.direction == "short" and tp_cfg.get("fixed_pct_short"):
+            fixed_tp_pct = tp_cfg["fixed_pct_short"]
         else:
-            tp = self.take_profit_mgr.calculate_target(price, sl.stop_pct, signal.direction)
+            fixed_tp_pct = tp_cfg.get("fixed_pct")
+
+        if fixed_tp_pct is not None and fixed_tp_pct > 0:
+            tp_price = entry_price * (1 + fixed_tp_pct) if signal.direction == "long" else entry_price * (1 - fixed_tp_pct)
+            tp = TakeProfitResult(target_price=round(tp_price, 8), target_pct=fixed_tp_pct, method="FIXED")
+        elif rr_ratio is not None and rr_ratio > 0:
+            tp = self.take_profit_mgr.calculate_target(entry_price, sl.stop_pct, signal.direction)
+        else:
+            unreachable = entry_price * (1 + 1.0) if signal.direction == "long" else entry_price * (1 - 1.0)
+            tp = TakeProfitResult(target_price=round(unreachable, 8), target_pct=1.0, method="TRAILING_ONLY")
 
         # 获取历史交易统计用于凯利公式
         stats = self.account.get_stats()
@@ -301,7 +426,7 @@ class BacktestEngine:
         pos = self.current_positions[symbol]
 
         # 滑点模拟：平仓价格恶化
-        slippage = self.config.get("general", {}).get("slippage", 0.001)
+        slippage = self.config.get("fees", {}).get("slippage", 0.0005)
         if pos["direction"] == "long":
             close_price = price * (1 - slippage)  # 做多平仓卖出价更低
         else:
@@ -318,7 +443,7 @@ class BacktestEngine:
         pnl = close_size * pnl_pct
 
         # 手续费: 开仓 + 平仓，都按名义价值(保证金*杠杆)收
-        fee_rate = self.config.get("general", {}).get("fee_rate", 0.0005)
+        fee_rate = self.config.get("fees", {}).get("taker", 0.0005)
         notional = close_size * pos["leverage"]
         open_fee = notional * fee_rate
         close_fee = notional * fee_rate

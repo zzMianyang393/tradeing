@@ -1,4 +1,4 @@
-"""规则信号生成器 - 趋势跟踪策略"""
+"""规则信号生成器 - 支持趋势跟踪和均值回归两种策略"""
 
 from dataclasses import dataclass
 from enum import Enum
@@ -20,6 +20,7 @@ class Signal:
     strength: float  # 0-1
     conditions: dict
     reason: str
+    metadata: dict = None  # 额外数据（不计入信号评分）
 
 
 class SignalGenerator:
@@ -29,21 +30,29 @@ class SignalGenerator:
         self.direction_mode = config.get("rules", {}).get("direction_mode", "both")
         self.min_conditions = config.get("rules", {}).get("min_conditions", 4)
         self.min_conditions_strict = config.get("rules", {}).get("min_conditions_strict", 6)
+        self.long_conditions_min = config.get("rules", {}).get("long_conditions_min", 0)  # 0=use min_conditions
         self.adx_threshold = config.get("adx", {}).get("threshold", 20)
+        self.strategy_mode = config.get("rules", {}).get("strategy_mode", "trend")
 
     def generate(self, df: pd.DataFrame) -> Optional[Signal]:
+        if self.strategy_mode == "mean_reversion":
+            return self._generate_mean_reversion(df)
+        if self.strategy_mode == "momentum":
+            return self._generate_momentum(df)
+        return self._generate_trend(df)
+
+    def _generate_trend(self, df: pd.DataFrame) -> Optional[Signal]:
+        """趋势跟踪信号"""
         if df.empty or len(df) < 3:
             return None
 
         latest = df.iloc[-1]
         prev = df.iloc[-2]
 
-        # ADX过滤：宽松阈值，只过滤极度震荡
         adx = latest.get("adx", 0)
         if adx < self.adx_threshold:
             return None
 
-        # 趋势方向（宽松）
         ema_slow = latest.get("ema_slow", 0)
         price = latest.get("close", 0)
         trend = "neutral"
@@ -58,8 +67,13 @@ class SignalGenerator:
             long_conditions = self._check_long_conditions(latest, prev, df)
             long_score = sum(long_conditions.values())
             total = len(long_conditions)
-            # long_only模式下正常阈值；short_only模式下需更强信号
-            long_threshold = self.min_conditions_strict if self.direction_mode == "short_only" else self.min_conditions
+            # 使用专用做多阈值（如果设置），否则用通用阈值
+            if self.long_conditions_min > 0:
+                long_threshold = self.long_conditions_min
+            elif self.direction_mode == "short_only":
+                long_threshold = self.min_conditions_strict
+            else:
+                long_threshold = self.min_conditions
             if long_score >= long_threshold:
                 strength = long_score / total
                 reasons = [k for k, v in long_conditions.items() if v]
@@ -75,8 +89,7 @@ class SignalGenerator:
             short_conditions = self._check_short_conditions(latest, prev, df)
             short_score = sum(short_conditions.values())
             total = len(short_conditions)
-            # short_only模式下正常阈值；long_only模式下需更强信号
-            short_threshold = self.min_conditions_strict if self.direction_mode == "long_only" else self.min_conditions
+            short_threshold = len(short_conditions)  # 要求所有条件都满足
             if short_score >= short_threshold:
                 strength = short_score / total
                 reasons = [k for k, v in short_conditions.items() if v]
@@ -89,76 +102,319 @@ class SignalGenerator:
 
         return None
 
+    def _generate_mean_reversion(self, df: pd.DataFrame) -> Optional[Signal]:
+        """均值回归信号 - 深度RSI反转 + BB确认（高选择性）"""
+        if df.empty or len(df) < 3:
+            return None
+
+        latest = df.iloc[-1]
+        prev = df.iloc[-2]
+
+        price = latest.get("close", 0)
+        bb_upper = latest.get("bb_upper", 0)
+        bb_lower = latest.get("bb_lower", 0)
+        bb_middle = latest.get("bb_middle", 0)
+        rsi = latest.get("rsi", 50)
+        stoch_k = latest.get("stoch_rsi_k", 50)
+        stoch_d = latest.get("stoch_rsi_d", 50)
+        prev_stoch_k = prev.get("stoch_rsi_k", 50)
+        prev_stoch_d = prev.get("stoch_rsi_d", 50)
+        vol_ratio = latest.get("volume_ratio", 1)
+        atr = latest.get("atr", 0)
+        adx_dmp = latest.get("adx_dmp", 0)
+        adx_dmn = latest.get("adx_dmn", 0)
+
+        if bb_upper <= 0 or bb_lower <= 0 or atr <= 0:
+            return None
+
+        candle_low = latest.get("low", price)
+        candle_close = latest.get("close", price)
+        candle_open = latest.get("open", price)
+        candle_high = latest.get("high", price)
+
+        # ========== 做多：深度超卖反转 ==========
+        long_conditions = {}
+
+        # 条件1: RSI深度超卖（<30）
+        long_conditions["RSI深度超卖"] = rsi < 30
+
+        # 条件2: 价格跌破BB下轨
+        long_conditions["跌破BB下轨"] = price < bb_lower
+
+        # 条件3: StochRSI深度超卖或金叉
+        stoch_cross_up = prev_stoch_k <= prev_stoch_d and stoch_k > stoch_d
+        long_conditions["StochRSI反转"] = stoch_cross_up or stoch_k < 20
+
+        # 条件4: 下影线支撑
+        lower_wick = min(candle_open, candle_close) - candle_low
+        long_conditions["下影线支撑"] = lower_wick > atr * 0.3
+
+        # 条件5: 放量
+        long_conditions["放量确认"] = vol_ratio > 1.3
+
+        # 条件6: 实体确认（K线实体需有一定大小，排除十字星）
+        candle_body = abs(candle_close - candle_open)
+        long_conditions["实体确认"] = candle_body > atr * 0.3
+
+        # 条件7: DI多头
+        long_conditions["DI确认"] = adx_dmp > adx_dmn
+
+        long_score = sum(long_conditions.values())
+        long_total = len(long_conditions)
+        long_threshold = self.min_conditions_strict if self.direction_mode == "short_only" else self.min_conditions
+
+        if long_score >= long_threshold:
+            strength = long_score / long_total
+            if rsi < 20:
+                strength = min(strength + 0.15, 1.0)
+            reasons = [k for k, v in long_conditions.items() if v]
+            return Signal(
+                type=SignalType.LONG,
+                strength=strength,
+                conditions=long_conditions,
+                reason=f"深度反转做多({long_score}/{long_total}): {', '.join(reasons)}",
+                metadata={"bb_middle": bb_middle},
+            )
+
+        # ========== 做空：深度超买回落 ==========
+        short_conditions = {}
+
+        # 条件1: RSI深度超买（>70）
+        short_conditions["RSI深度超买"] = rsi > 70
+
+        # 条件2: 价格突破BB上轨
+        short_conditions["突破BB上轨"] = price > bb_upper
+
+        # 条件3: StochRSI深度超买或死叉
+        stoch_cross_down = prev_stoch_k >= prev_stoch_d and stoch_k < stoch_d
+        short_conditions["StochRSI反转"] = stoch_cross_down or stoch_k > 80
+
+        # 条件4: 上影线压力
+        upper_wick = candle_high - max(candle_open, candle_close)
+        short_conditions["上影线压力"] = upper_wick > atr * 0.3
+
+        # 条件5: 放量
+        short_conditions["放量确认"] = vol_ratio > 1.3
+
+        # 条件6: 实体确认（K线实体需有一定大小，排除十字星）
+        candle_body = abs(candle_close - candle_open)
+        short_conditions["实体确认"] = candle_body > atr * 0.3
+
+        # 条件7: DI空头
+        short_conditions["DI确认"] = adx_dmn > adx_dmp
+
+        short_score = sum(short_conditions.values())
+        short_total = len(short_conditions)
+        short_threshold = self.min_conditions_strict if self.direction_mode == "long_only" else self.min_conditions
+
+        if short_score >= short_threshold:
+            strength = short_score / short_total
+            if rsi > 80:
+                strength = min(strength + 0.15, 1.0)
+            reasons = [k for k, v in short_conditions.items() if v]
+            return Signal(
+                type=SignalType.SHORT,
+                strength=strength,
+                conditions=short_conditions,
+                reason=f"深度反转做空({short_score}/{short_total}): {', '.join(reasons)}",
+                metadata={"bb_middle": bb_middle},
+            )
+
+        return None
+
+    def _generate_momentum(self, df: pd.DataFrame) -> Optional[Signal]:
+        """动量突破策略 — 顺势交易，捕捉趋势延续"""
+        if df.empty or len(df) < 25:
+            return None
+
+        latest = df.iloc[-1]
+        prev = df.iloc[-2]
+
+        price = latest.get("close", 0)
+        adx = latest.get("adx", 0)
+        if adx < self.adx_threshold:
+            return None
+
+        vol_ratio = latest.get("volume_ratio", 1)
+        rsi = latest.get("rsi", 50)
+        prev_rsi = prev.get("rsi", 50)
+        ema_fast = latest.get("ema_fast", 0)
+        ema_medium = latest.get("ema_medium", 0)
+        ema_slow = latest.get("ema_slow", 0)
+        macd_hist = latest.get("macd_hist", 0)
+        prev_macd_hist = prev.get("macd_hist", 0)
+        atr = latest.get("atr", 0)
+
+        if ema_fast <= 0 or ema_medium <= 0 or atr <= 0:
+            return None
+
+        # 计算近20根K线的最高/最低价（不含当前K线）
+        lookback = df.iloc[-21:-1]
+        recent_high = lookback["high"].max()
+        recent_low = lookback["low"].min()
+
+        # DI方向
+        adx_dmp = latest.get("adx_dmp", 0)
+        adx_dmn = latest.get("adx_dmn", 0)
+
+        # ========== 做多：向上突破 ==========
+        long_conditions = {}
+
+        # 条件1: 价格突破近20根K线最高价（需超过0.2%避免假突破）
+        long_conditions["向上突破"] = price > recent_high * 1.002
+
+        # 条件2: 成交量放大（突破需要量能确认）
+        long_conditions["放量确认"] = vol_ratio > 1.3
+
+        # 条件3: RSI > 50 且上升（多头动量）
+        long_conditions["RSI多头"] = rsi > 50 and rsi > prev_rsi
+
+        # 条件4: EMA快线 > 中线（趋势向上）
+        long_conditions["EMA多头排列"] = ema_fast > ema_medium
+
+        # 条件5: MACD柱状图为正且增长
+        long_conditions["MACD动量"] = macd_hist > 0 and macd_hist > prev_macd_hist
+
+        # 条件6: DI确认（多头力量）
+        long_conditions["DI确认"] = adx_dmp > adx_dmn
+
+        long_score = sum(long_conditions.values())
+        long_total = len(long_conditions)
+        long_threshold = self.min_conditions_strict if self.direction_mode == "short_only" else self.min_conditions
+
+        if long_score >= long_threshold:
+            strength = long_score / long_total
+            if adx > 30:
+                strength = min(strength + 0.1, 1.0)
+            reasons = [k for k, v in long_conditions.items() if v]
+            return Signal(
+                type=SignalType.LONG,
+                strength=strength,
+                conditions=long_conditions,
+                reason=f"动量做多({long_score}/{long_total}): {', '.join(reasons)}",
+                metadata={"breakout_high": recent_high},
+            )
+
+        # ========== 做空：向下突破 ==========
+        short_conditions = {}
+
+        # 条件1: 价格跌破近20根K线最低价（需跌破0.2%避免假突破）
+        short_conditions["向下突破"] = price < recent_low * 0.998
+
+        # 条件2: 成交量放大
+        short_conditions["放量确认"] = vol_ratio > 1.3
+
+        # 条件3: RSI < 50 且下降（空头动量）
+        short_conditions["RSI空头"] = rsi < 50 and rsi < prev_rsi
+
+        # 条件4: EMA快线 < 中线（趋势向下）
+        short_conditions["EMA空头排列"] = ema_fast < ema_medium
+
+        # 条件5: MACD柱状图为负且下降
+        short_conditions["MACD动量"] = macd_hist < 0 and macd_hist < prev_macd_hist
+
+        # 条件6: DI确认（空头力量）
+        short_conditions["DI确认"] = adx_dmn > adx_dmp
+
+        short_score = sum(short_conditions.values())
+        short_total = len(short_conditions)
+        short_threshold = self.min_conditions_strict if self.direction_mode == "long_only" else self.min_conditions
+
+        if short_score >= short_threshold:
+            strength = short_score / short_total
+            if adx > 30:
+                strength = min(strength + 0.1, 1.0)
+            reasons = [k for k, v in short_conditions.items() if v]
+            return Signal(
+                type=SignalType.SHORT,
+                strength=strength,
+                conditions=short_conditions,
+                reason=f"动量做空({short_score}/{short_total}): {', '.join(reasons)}",
+                metadata={"breakout_low": recent_low},
+            )
+
+        return None
+
     def _check_long_conditions(self, latest: pd.Series, prev: pd.Series, df: pd.DataFrame) -> dict:
-        """做多条件检查 - 只在确认的上涨趋势中买入"""
+        """做多条件检查 - EMA交叉 + 动量确认"""
         conditions = {}
 
         ema_fast = latest.get("ema_fast", 0)
         ema_medium = latest.get("ema_medium", 0)
         ema_slow = latest.get("ema_slow", 0)
+        prev_ema_fast = prev.get("ema_fast", 0)
+        prev_ema_medium = prev.get("ema_medium", 0)
         price = latest.get("close", 0)
 
-        # 条件1: EMA多头排列（必须）
-        conditions["EMA多头排列"] = ema_fast > ema_medium > ema_slow
+        # 条件1: EMA金叉（fast从下方穿过medium）
+        golden_cross = (prev_ema_fast <= prev_ema_medium) and (ema_fast > ema_medium)
+        conditions["EMA金叉"] = golden_cross
 
-        # 条件2: 价格必须在慢线之上（趋势确认）
-        conditions["价格在慢线之上"] = price > ema_slow * 1.005 if ema_slow > 0 else False
+        # 条件2: 价格在慢线之上（趋势确认）
+        conditions["价格在慢线之上"] = price > ema_slow * 1.003 if ema_slow > 0 else False
 
-        # 条件3: 价格回踩EMA（买入时机）
-        if ema_fast > 0:
-            ema9_dist = (price - ema_fast) / ema_fast
-            conditions["价格回踩EMA"] = -0.008 <= ema9_dist <= 0.008
-        else:
-            conditions["价格回踩EMA"] = False
-
-        # 条件4: RSI在健康区间（40-65）
+        # 条件3: RSI上升动量
         rsi = latest.get("rsi", 50)
-        conditions["RSI健康区间"] = 40 < rsi < 65
+        prev_rsi = prev.get("rsi", 50)
+        conditions["RSI上升"] = rsi > prev_rsi and 35 < rsi < 70
 
-        # 条件5: 成交量确认
+        # 条件4: 成交量放大
         vol_ratio = latest.get("volume_ratio", 1)
-        conditions["成交量确认"] = vol_ratio > 1.0  # 放量
+        conditions["放量确认"] = vol_ratio > 1.2
 
-        # 条件6: 前K线收阳
+        # 条件5: 前K线收阳
         prev_close = prev.get("close", 0)
         prev_open = prev.get("open", 0)
         conditions["前K线收阳"] = prev_close > prev_open
 
-        # 条件7: DI确认（多头力量）
+        # 条件6: DI确认（多头力量）
         adx_dmp = latest.get("adx_dmp", 0)
         adx_dmn = latest.get("adx_dmn", 0)
         conditions["DI确认"] = adx_dmp > adx_dmn
 
+        # 条件7: 价格在EMA9上方（动量确认）
+        conditions["价格在EMA9上方"] = price > ema_fast if ema_fast > 0 else False
+
         return conditions
 
     def _check_short_conditions(self, latest: pd.Series, prev: pd.Series, df: pd.DataFrame) -> dict:
-        """做空条件检查 - 做多的镜像"""
+        """做空条件检查 - EMA死叉 + 动量确认"""
         conditions = {}
 
         ema_fast = latest.get("ema_fast", 0)
         ema_medium = latest.get("ema_medium", 0)
         ema_slow = latest.get("ema_slow", 0)
-        conditions["EMA空头排列"] = ema_fast < ema_medium < ema_slow
-
+        prev_ema_fast = prev.get("ema_fast", 0)
+        prev_ema_medium = prev.get("ema_medium", 0)
         price = latest.get("close", 0)
-        if ema_fast > 0:
-            ema9_dist = (price - ema_fast) / ema_fast
-            conditions["价格反弹EMA"] = -0.008 <= ema9_dist <= 0.008
-        else:
-            conditions["价格反弹EMA"] = False
 
+        # 条件1: EMA死叉（fast从上方穿过medium）
+        death_cross = (prev_ema_fast >= prev_ema_medium) and (ema_fast < ema_medium)
+        conditions["EMA死叉"] = death_cross
+
+        # 条件2: 价格在慢线之下（趋势确认）
+        conditions["价格在慢线之下"] = price < ema_slow * 0.997 if ema_slow > 0 else False
+
+        # 条件3: RSI下降动量
         rsi = latest.get("rsi", 50)
-        conditions["RSI未超卖"] = rsi > 35
+        prev_rsi = prev.get("rsi", 50)
+        conditions["RSI下降"] = rsi < prev_rsi and 30 < rsi < 65
 
+        # 条件4: 成交量放大
         vol_ratio = latest.get("volume_ratio", 1)
-        conditions["成交量确认"] = vol_ratio > 0.8
+        conditions["放量确认"] = vol_ratio > 1.2
 
+        # 条件5: 前K线收阴
         prev_close = prev.get("close", 0)
         prev_open = prev.get("open", 0)
         conditions["前K线收阴"] = prev_close < prev_open
 
+        # 条件6: DI确认（空头力量）
         adx_dmp = latest.get("adx_dmp", 0)
         adx_dmn = latest.get("adx_dmn", 0)
         conditions["DI确认"] = adx_dmn > adx_dmp
+
+        # 条件7: 价格在EMA9下方（动量确认）
+        conditions["价格在EMA9下方"] = price < ema_fast if ema_fast > 0 else False
 
         return conditions

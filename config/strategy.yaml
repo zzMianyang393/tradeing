@@ -36,9 +36,11 @@ indicators:
 
 # 规则信号
 rules:
-  min_conditions: 5       # 正常方向最少满足条件数
-  min_conditions_strict: 6 # 反方向最少满足条件数（更强过滤）
-  direction_mode: "long_only"  # long_only=倾向做多但强信号可做空, both=双向, short_only=倾向做空
+  min_conditions: 6       # 7个条件需满足6个（高选择性）
+  min_conditions_strict: 6 # 反方向要求所有条件
+  long_conditions_min: 6   # 做多要求所有6个条件（更严格）
+  direction_mode: "both"  # long_only=倾向做多但强信号可做空, both=双向, short_only=倾向做空
+  strategy_mode: "mean_reversion"  # trend=趋势跟踪, mean_reversion=均值回归, momentum=动量突破
 
 # ADX 趋势强度过滤
 adx:
@@ -48,11 +50,11 @@ adx:
 # ML 模型
 ml:
   enabled: false           # false = 纯规则交易；true = ML只作为过滤器
-  mode: "advisor"          # filter=只过滤；advisor=预测幅度并参与TP/SL和持仓管理
+  mode: "filter"           # filter=只过滤；advisor=预测幅度并参与TP/SL和持仓管理
   train_days: 90           # 训练数据天数
   retrain_interval: 604800 # 重新训练间隔（秒，7天）
   predict_horizon: 4       # 预测未来N根K线
-  confidence_threshold: 0.5 # 置信度阈值
+  confidence_threshold: 0.3 # 置信度阈值
   min_expected_return: 0.001 # 至少预测+0.1%净收益才通过
   min_win_prob: 0.55       # 至少55%胜率才通过
   take_profit_capture: 0.8 # 预测幅度的80%作为动态止盈参考
@@ -64,19 +66,19 @@ ml:
 
 # 风控参数
 risk:
-  max_position_pct: 0.03       # 单笔最大亏损占总资金比例（3%）
-  max_concurrent_positions: 3  # 最大同时持仓数
-  max_daily_loss: 0.10         # 日最大亏损比例(10%)
+  max_position_pct: 0.02       # 单笔最大亏损占总资金比例（2%）
+  max_concurrent_positions: 2  # 最大同时持仓数
+  max_daily_loss: 0.08         # 日最大亏损比例(8%)
   min_risk_reward: 1.5         # 最小盈亏比
   kelly_fraction: 0.5          # 凯利分数（半凯利）
-  min_position_pct: 0.20       # 最小仓位比例（20%）
-  max_position_pct_cap: 0.40   # 最大仓位比例（40%）
+  min_position_pct: 0.15       # 最小仓位比例（15%）
+  max_position_pct_cap: 0.30   # 最大仓位比例（30%）
   min_trades_for_kelly: 10     # 凯利公式最少交易数（warmup）
 
 # 杠杆设置 — 程序根据信号强度在min~max之间动态选择
 leverage:
-  min: 5
-  max: 10
+  min: 3
+  max: 5
   signal_thresholds:
     strong: 0.8    # 信号强度>0.8 → 接近max
     medium: 0.6    # 信号强度>0.6 → 中间值
@@ -84,15 +86,15 @@ leverage:
 
 # 止损策略
 stop_loss:
-  atr_multiplier: 2.0
-  max_pct: 0.015             # 最大止损 1.5%
-  fixed_pct: 0.015           # 固定止损 1.5%
-  trailing_activate: 0.05    # 禁用追踪止损
-  trailing_callback: 0.05    # 禁用追踪止损
+  max_pct: 0.025             # 固定止损 2.5%（深度反转需要更宽止损）
+  fixed_pct: 0.025           # 固定止损 2.5%
+  trailing_activate: 0       # 禁用追踪止损
+  trailing_callback: 0       # 禁用追踪止损
+  trailing_long_only: false
 
 # 止盈策略
 take_profit:
-  risk_reward_ratio: 1.5     # RR=1:1.5 → TP=2.25% when SL=1.5%
-  fixed_pct: 0.0225          # 固定止盈 2.25%
-  partial_close_pct: 0.5
-  partial_close_trigger: 0.0  # 禁用部分止盈
+  fixed_pct: 0.0375          # 固定止盈 3.75% (1.5:1 盈亏比)
+  risk_reward_ratio: 1.5
+  partial_close_pct: 0.5     # 部分止盈50%
+  partial_close_trigger: 0.03   # 盈利3%时部分止盈（剩余运行到3.75%）
