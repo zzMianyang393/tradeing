@@ -174,6 +174,8 @@ class AccountManager:
         return record
 
     def get_stats(self) -> dict:
+        import math
+
         if not self.trade_history:
             return {
                 "total_trades": 0,
@@ -185,6 +187,31 @@ class AccountManager:
 
         wins = [t for t in self.trade_history if t.pnl > 0]
         losses = [t for t in self.trade_history if t.pnl <= 0]
+
+        # Trade returns for Sharpe calculation (pnl_pct from each trade)
+        trade_returns = [t.pnl_pct for t in self.trade_history]
+
+        # Annualized Sharpe ratio: sqrt(252*96) * mean(returns) / std(returns)
+        # 96 bars per day on 15m timeframe
+        sharpe = 0.0
+        if len(trade_returns) >= 2:
+            mean_ret = sum(trade_returns) / len(trade_returns)
+            var = sum((r - mean_ret) ** 2 for r in trade_returns) / (len(trade_returns) - 1)
+            std_ret = math.sqrt(var) if var > 0 else 0
+            if std_ret > 0:
+                sharpe = math.sqrt(252 * 96) * mean_ret / std_ret
+
+        # Max drawdown from balance curve
+        max_dd = 0.0
+        peak = self.initial_capital
+        running_balance = self.initial_capital
+        for t in self.trade_history:
+            running_balance += t.pnl
+            if running_balance > peak:
+                peak = running_balance
+            dd = (peak - running_balance) / peak if peak > 0 else 0
+            if dd > max_dd:
+                max_dd = dd
 
         return {
             "total_trades": len(self.trade_history),
@@ -199,6 +226,8 @@ class AccountManager:
             "max_loss": min((t.pnl for t in self.trade_history), default=0),
             "avg_win": sum(t.pnl for t in wins) / len(wins) if wins else 0,
             "avg_loss": sum(t.pnl for t in losses) / len(losses) if losses else 0,
+            "sharpe_ratio": round(sharpe, 4),
+            "max_drawdown": round(max_dd, 6),
         }
 
     def reset_daily_pnl(self):

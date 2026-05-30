@@ -237,7 +237,11 @@ class HybridStrategy:
             if regime["confidence"] < 0.5:
                 rule_signal.strength *= 0.8
         else:
-            rule_signal = self.signal_gen.generate(df)
+            # trend_4h_filter 需要 htf_df 来判断4小时趋势
+            if strategy_mode == "trend_4h_filter" and htf_df is not None:
+                rule_signal = self.signal_gen.generate(df, htf_df=htf_df)
+            else:
+                rule_signal = self.signal_gen.generate(df)
             if rule_signal is None:
                 return None
 

@@ -34,11 +34,13 @@ class SignalGenerator:
         self.adx_threshold = config.get("adx", {}).get("threshold", 20)
         self.strategy_mode = config.get("rules", {}).get("strategy_mode", "trend")
 
-    def generate(self, df: pd.DataFrame) -> Optional[Signal]:
+    def generate(self, df: pd.DataFrame, htf_df: Optional[pd.DataFrame] = None) -> Optional[Signal]:
         if self.strategy_mode == "mean_reversion":
             return self._generate_mean_reversion(df)
         if self.strategy_mode == "momentum":
             return self._generate_momentum(df)
+        if self.strategy_mode == "trend_4h_filter":
+            return self._generate_trend_4h_filter(df, htf_df)
         return self._generate_trend(df)
 
     def _generate_trend(self, df: pd.DataFrame) -> Optional[Signal]:
@@ -404,6 +406,97 @@ class SignalGenerator:
                 reason=f"动量做空({short_score}/{short_total}): {', '.join(reasons)}",
                 metadata={"breakout_low": recent_low},
             )
+
+        return None
+
+    def _generate_trend_4h_filter(self, df: pd.DataFrame, htf_df: Optional[pd.DataFrame] = None) -> Optional[Signal]:
+        """4小时趋势过滤策略 — 用4h EMA55判断趋势方向，15m RSI+成交量入场"""
+        if df.empty or len(df) < 3:
+            return None
+
+        latest = df.iloc[-1]
+
+        # ========== 4小时趋势判断 ==========
+        if htf_df is not None and not htf_df.empty and len(htf_df) >= 60:
+            # 使用提供的4h数据
+            htf_close = htf_df["close"]
+            htf_ema55 = htf_close.ewm(span=55, adjust=False).mean()
+            htf_price = float(htf_close.iloc[-1])
+            htf_ema55_val = float(htf_ema55.iloc[-1])
+        else:
+            # 从15m数据重采样到4h
+            if "timestamp" in df.columns:
+                tmp = df[["timestamp", "open", "high", "low", "close", "volume"]].copy()
+                tmp.index = pd.to_datetime(tmp["timestamp"], unit="ms")
+            else:
+                tmp = df[["open", "high", "low", "close", "volume"]].copy()
+                tmp.index = df.index
+
+            df_4h = tmp.resample("4h").agg({
+                "open": "first", "high": "max", "low": "min",
+                "close": "last", "volume": "sum",
+            }).dropna()
+
+            if len(df_4h) < 60:
+                return None
+
+            htf_close = df_4h["close"]
+            htf_ema55 = htf_close.ewm(span=55, adjust=False).mean()
+            htf_price = float(htf_close.iloc[-1])
+            htf_ema55_val = float(htf_ema55.iloc[-1])
+
+        # 4h趋势判断
+        if htf_price > htf_ema55_val * 1.01:
+            htf4_trend = "bullish"
+        elif htf_price < htf_ema55_val * 0.99:
+            htf4_trend = "bearish"
+        else:
+            htf4_trend = "neutral"
+
+        # ========== 15m入场条件 ==========
+        price = latest.get("close", 0)
+        rsi = latest.get("rsi", 50)
+        vol_ratio = latest.get("volume_ratio", 1)
+
+        # LONG entry (only in bullish 4h trend)
+        if htf4_trend == "bullish":
+            long_conditions = {
+                "RSI超卖": rsi < 40,
+                "放量确认": vol_ratio > 1.0,
+            }
+            long_score = sum(long_conditions.values())
+            long_total = len(long_conditions)
+
+            if long_score >= long_total:  # 所有条件都满足
+                strength = long_score / long_total
+                reasons = [k for k, v in long_conditions.items() if v]
+                return Signal(
+                    type=SignalType.LONG,
+                    strength=strength,
+                    conditions=long_conditions,
+                    reason=f"4H趋势做多({htf4_trend})({long_score}/{long_total}): {', '.join(reasons)}",
+                    metadata={"htf4_trend": htf4_trend, "htf_ema55": htf_ema55_val},
+                )
+
+        # SHORT entry (only in bearish 4h trend)
+        if htf4_trend == "bearish":
+            short_conditions = {
+                "RSI超买": rsi > 60,
+                "放量确认": vol_ratio > 1.0,
+            }
+            short_score = sum(short_conditions.values())
+            short_total = len(short_conditions)
+
+            if short_score >= short_total:  # 所有条件都满足
+                strength = short_score / short_total
+                reasons = [k for k, v in short_conditions.items() if v]
+                return Signal(
+                    type=SignalType.SHORT,
+                    strength=strength,
+                    conditions=short_conditions,
+                    reason=f"4H趋势做空({htf4_trend})({short_score}/{short_total}): {', '.join(reasons)}",
+                    metadata={"htf4_trend": htf4_trend, "htf_ema55": htf_ema55_val},
+                )
 
         return None
 

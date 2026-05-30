@@ -35,6 +35,10 @@ class BacktestEngine:
         self.cooldown_bars = 6  # 平仓后冷却6根K线（1.5小时）
         self.current_bar_index = 0
 
+        # Per-bar portfolio tracking for Sharpe calculation
+        self.portfolio_values: list[float] = []
+        self.daily_returns: list[float] = []
+
     def run(
         self,
         symbol: str,
@@ -45,6 +49,8 @@ class BacktestEngine:
     ) -> dict:
         # 每个币种回测前重置每日盈亏计数器
         self.account.daily_pnl = 0.0
+        self.portfolio_values = []
+        self.daily_returns = []
 
         if train_data is not None and not train_data.empty:
             self.strategy.train_ml({symbol: train_data}, force=False)
@@ -66,6 +72,23 @@ class BacktestEngine:
             htf_4h = self.indicators.calculate(htf4_data)
             if htf_4h.empty or len(htf_4h) < 10:
                 htf_4h = None
+
+        # 存储4h数据供 trend_4h_filter 策略使用
+        # 即使没有外部4h数据，也从15m数据自动重采样生成4h（供trend_4h_filter策略使用）
+        if htf_4h is None and "timestamp" in df.columns:
+            tmp = df[["timestamp", "open", "high", "low", "close", "volume"]].copy()
+            tmp.index = pd.to_datetime(tmp["timestamp"], unit="ms")
+            resampled = tmp.resample("4h").agg({
+                "open": "first", "high": "max", "low": "min",
+                "close": "last", "volume": "sum",
+            }).dropna()
+            if len(resampled) >= 10:
+                resampled = resampled.reset_index()
+                resampled["timestamp"] = (resampled["timestamp"].astype("int64") // 1_000_000).astype(int)
+                htf_4h = resampled
+                logger.info(f"  自动重采样4h: {len(htf_4h)} bars")
+
+        self._htf_4h_df = htf_4h
 
         logger.info(f"回测 {symbol}: {len(df)} 根K线"
                      + (f", 1h={len(htf_1h)}条" if htf_1h is not None else "")
@@ -98,7 +121,19 @@ class BacktestEngine:
             self._check_positions(symbol, current_price, current, current_time)
             self._check_signals(symbol, window, current_price, current_time, htf_trend, i, htf4_trend)
 
+            # Track portfolio value per bar
+            self.portfolio_values.append(self.account.balance)
+
         self._close_all_positions(symbol, df.iloc[-1], df.index[-1])
+
+        # Calculate daily returns from portfolio values (96 bars per day on 15m)
+        if len(self.portfolio_values) > 1:
+            bars_per_day = 96
+            for i in range(bars_per_day, len(self.portfolio_values), bars_per_day):
+                prev = self.portfolio_values[i - bars_per_day]
+                curr = self.portfolio_values[i]
+                if prev > 0:
+                    self.daily_returns.append((curr - prev) / prev)
 
         stats = self.account.get_stats()
         stats["symbol"] = symbol
@@ -305,7 +340,14 @@ class BacktestEngine:
         if not can_open:
             return
 
-        signal = self.strategy.analyze(symbol, df)
+        # 获取4h窗口数据（用于 trend_4h_filter 策略）
+        htf4_window = None
+        if hasattr(self, '_htf_4h_df') and self._htf_4h_df is not None and "timestamp" in df.columns:
+            current_ts = df.iloc[-1].get("timestamp", 0)
+            htf_mask = self._htf_4h_df["timestamp"] <= current_ts
+            htf4_window = self._htf_4h_df[htf_mask]
+
+        signal = self.strategy.analyze(symbol, df, htf_df=htf4_window)
         if signal is None:
             return
 
