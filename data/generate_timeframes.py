@@ -37,7 +37,7 @@ def resample(df_15m: pd.DataFrame, target_tf: str) -> pd.DataFrame:
 
     # 转为毫秒时间戳
     if df_resampled["timestamp"].dtype != "int64":
-        df_resampled["timestamp"] = df_resampled["timestamp"].astype(np.int64) // 10**6
+        df_resampled["timestamp"] = df_resampled["timestamp"].astype(np.int64)
 
     return df_resampled
 

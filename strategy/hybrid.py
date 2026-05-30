@@ -155,6 +155,53 @@ class HybridStrategy:
         advice["symbol"] = symbol
         return advice
 
+    def _detect_market_regime(self, df: pd.DataFrame) -> dict:
+        """检测市场regime：趋势/震荡/不确定"""
+        latest = df.iloc[-1]
+
+        adx = latest.get("adx", 20)
+        adx_dmp = latest.get("adx_dmp", 0)
+        adx_dmn = latest.get("adx_dmn", 0)
+        price = latest.get("close", 0)
+        ema_slow = latest.get("ema_slow", 0)
+
+        # 计算趋势方向
+        trend_direction = "neutral"
+        if ema_slow > 0:
+            if price > ema_slow * 1.03:
+                trend_direction = "bullish"
+            elif price < ema_slow * 0.97:
+                trend_direction = "bearish"
+
+        # 计算趋势强度 (0-1)
+        trend_strength = min(adx / 40, 1.0)
+
+        # 默认使用均值回归（更安全）
+        strategy = "mean_reversion"
+        confidence = 0.6
+
+        # 只有在非常明确的强趋势时才切换到趋势策略
+        if adx >= 32 and trend_direction != "neutral":
+            # 非常强的趋势 → 趋势跟踪
+            strategy = "trend"
+            confidence = min(0.5 + trend_strength * 0.4, 0.9)
+        elif adx <= 20:
+            # 弱趋势 → 均值回归
+            strategy = "mean_reversion"
+            confidence = 0.7
+        else:
+            # 中等趋势 → 保守选择均值回归
+            strategy = "mean_reversion"
+            confidence = 0.5
+
+        return {
+            "strategy": strategy,
+            "confidence": confidence,
+            "adx": adx,
+            "trend_direction": trend_direction,
+            "trend_strength": trend_strength,
+        }
+
     def analyze(
         self, symbol: str, df: pd.DataFrame, htf_df: Optional[pd.DataFrame] = None
     ) -> Optional[TradeSignal]:
@@ -162,37 +209,34 @@ class HybridStrategy:
         if df.empty or len(df) < 60:
             return None
 
-        # 多策略组合：根据ADX自动选择策略
+        # ========== 自适应多策略引擎 ==========
         strategy_mode = self.signal_gen.strategy_mode
+
         if strategy_mode == "auto":
-            latest_adx = df.iloc[-1].get("adx", 20)
-            if latest_adx >= 25:
-                # 强趋势 → 趋势跟踪
-                self.signal_gen.strategy_mode = "trend"
-            elif latest_adx <= 18:
-                # 震荡市 → 均值回归
-                self.signal_gen.strategy_mode = "mean_reversion"
-            else:
-                # 过渡区 → 两种都试
-                self.signal_gen.strategy_mode = "trend"
+            regime = self._detect_market_regime(df)
+            self.signal_gen.strategy_mode = regime["strategy"]
 
-        rule_signal = self.signal_gen.generate(df)
-
-        # 如果主策略无信号，尝试备选策略
-        if rule_signal is None and strategy_mode == "auto":
-            latest_adx = df.iloc[-1].get("adx", 20)
-            if latest_adx >= 25:
-                self.signal_gen.strategy_mode = "mean_reversion"
-            else:
-                self.signal_gen.strategy_mode = "trend"
             rule_signal = self.signal_gen.generate(df)
 
-        # 恢复原始模式
-        if strategy_mode == "auto":
+            # 如果主策略无信号，尝试备选策略
+            if rule_signal is None:
+                fallback = "mean_reversion" if regime["strategy"] == "trend" else "trend"
+                self.signal_gen.strategy_mode = fallback
+                rule_signal = self.signal_gen.generate(df)
+
+            # 恢复原始模式
             self.signal_gen.strategy_mode = "auto"
 
-        if rule_signal is None:
-            return None
+            if rule_signal is None:
+                return None
+
+            # 根据市场regime调整信号强度
+            if regime["confidence"] < 0.5:
+                rule_signal.strength *= 0.8  # 低信心时削弱信号
+        else:
+            rule_signal = self.signal_gen.generate(df)
+            if rule_signal is None:
+                return None
 
         ml_pred = dict(NEUTRAL_PREDICTION)
         reason_suffix = "ML: disabled"

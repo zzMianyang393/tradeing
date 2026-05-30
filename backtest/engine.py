@@ -330,35 +330,45 @@ class BacktestEngine:
             entry_price = price * (1 - slippage)  # 做空卖出价更低
 
         atr = float(row.get("atr", price * 0.01))
+        atr_pct = atr / entry_price if entry_price > 0 else 0.01
 
-        # 方向特定止损
+        # ATR自适应止损：根据波动率动态调整
         sl_cfg = self.config.get("stop_loss", {})
-        if signal.direction == "short" and sl_cfg.get("fixed_pct_short"):
-            fixed_sl_pct = sl_cfg["fixed_pct_short"]
+        atr_sl_mult = sl_cfg.get("atr_multiplier", 0)  # 0=使用固定比例
+
+        if atr_sl_mult > 0:
+            # ATR模式：SL = entry ± atr_multiplier * ATR
+            sl_pct = atr_sl_mult * atr_pct
+            sl_pct = max(sl_pct, 0.01)  # 最小1%
+            sl_pct = min(sl_pct, 0.05)  # 最大5%
+            sl_price = entry_price * (1 - sl_pct) if signal.direction == "long" else entry_price * (1 + sl_pct)
+            sl = StopLossResult(stop_price=round(sl_price, 8), stop_pct=sl_pct, method="ATR")
         else:
-            fixed_sl_pct = sl_cfg.get("fixed_pct")
-        if fixed_sl_pct is not None and fixed_sl_pct > 0:
+            # 固定比例模式
+            fixed_sl_pct = sl_cfg.get("fixed_pct", 0.025)
+            if signal.direction == "short" and sl_cfg.get("fixed_pct_short"):
+                fixed_sl_pct = sl_cfg["fixed_pct_short"]
             sl_price = entry_price * (1 - fixed_sl_pct) if signal.direction == "long" else entry_price * (1 + fixed_sl_pct)
             sl = StopLossResult(stop_price=round(sl_price, 8), stop_pct=fixed_sl_pct, method="FIXED")
-        else:
-            sl = self.stop_loss_mgr.calculate_atr_stop(entry_price, atr, signal.direction)
 
-        # 方向特定止盈
+        # ATR自适应止盈
         tp_cfg = self.config.get("take_profit", {})
-        rr_ratio = tp_cfg.get("risk_reward_ratio", 2.0)
-        if signal.direction == "short" and tp_cfg.get("fixed_pct_short"):
-            fixed_tp_pct = tp_cfg["fixed_pct_short"]
-        else:
-            fixed_tp_pct = tp_cfg.get("fixed_pct")
+        atr_tp_mult = tp_cfg.get("atr_multiplier", 0)
 
-        if fixed_tp_pct is not None and fixed_tp_pct > 0:
+        if atr_tp_mult > 0:
+            # ATR模式：TP = entry ± atr_multiplier * ATR
+            tp_pct = atr_tp_mult * atr_pct
+            tp_pct = max(tp_pct, 0.015)  # 最小1.5%
+            tp_pct = min(tp_pct, 0.08)  # 最大8%
+            tp_price = entry_price * (1 + tp_pct) if signal.direction == "long" else entry_price * (1 - tp_pct)
+            tp = TakeProfitResult(target_price=round(tp_price, 8), target_pct=tp_pct, method="ATR")
+        else:
+            # 固定比例模式
+            fixed_tp_pct = tp_cfg.get("fixed_pct", 0.0375)
+            if signal.direction == "short" and tp_cfg.get("fixed_pct_short"):
+                fixed_tp_pct = tp_cfg["fixed_pct_short"]
             tp_price = entry_price * (1 + fixed_tp_pct) if signal.direction == "long" else entry_price * (1 - fixed_tp_pct)
             tp = TakeProfitResult(target_price=round(tp_price, 8), target_pct=fixed_tp_pct, method="FIXED")
-        elif rr_ratio is not None and rr_ratio > 0:
-            tp = self.take_profit_mgr.calculate_target(entry_price, sl.stop_pct, signal.direction)
-        else:
-            unreachable = entry_price * (1 + 1.0) if signal.direction == "long" else entry_price * (1 - 1.0)
-            tp = TakeProfitResult(target_price=round(unreachable, 8), target_pct=1.0, method="TRAILING_ONLY")
 
         # 获取历史交易统计用于凯利公式
         stats = self.account.get_stats()
