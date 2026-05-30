@@ -28,8 +28,8 @@ def run_backtest(config: dict, days: int = 90):
     fetcher = DataFetcher(storage)
 
     csv_files = {
-        "BTC/USDT:USDT": "data/BTC_15m.csv",
-        "ETH/USDT:USDT": "data/ETH_15m.csv",
+        "BTC/USDT:USDT": "data/BTC_1d.csv",
+        "ETH/USDT:USDT": "data/ETH_1d.csv",
     }
 
     all_data = {}

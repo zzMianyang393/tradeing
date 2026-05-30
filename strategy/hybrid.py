@@ -162,7 +162,35 @@ class HybridStrategy:
         if df.empty or len(df) < 60:
             return None
 
+        # 多策略组合：根据ADX自动选择策略
+        strategy_mode = self.signal_gen.strategy_mode
+        if strategy_mode == "auto":
+            latest_adx = df.iloc[-1].get("adx", 20)
+            if latest_adx >= 25:
+                # 强趋势 → 趋势跟踪
+                self.signal_gen.strategy_mode = "trend"
+            elif latest_adx <= 18:
+                # 震荡市 → 均值回归
+                self.signal_gen.strategy_mode = "mean_reversion"
+            else:
+                # 过渡区 → 两种都试
+                self.signal_gen.strategy_mode = "trend"
+
         rule_signal = self.signal_gen.generate(df)
+
+        # 如果主策略无信号，尝试备选策略
+        if rule_signal is None and strategy_mode == "auto":
+            latest_adx = df.iloc[-1].get("adx", 20)
+            if latest_adx >= 25:
+                self.signal_gen.strategy_mode = "mean_reversion"
+            else:
+                self.signal_gen.strategy_mode = "trend"
+            rule_signal = self.signal_gen.generate(df)
+
+        # 恢复原始模式
+        if strategy_mode == "auto":
+            self.signal_gen.strategy_mode = "auto"
+
         if rule_signal is None:
             return None
 

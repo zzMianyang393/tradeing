@@ -135,3 +135,39 @@ class DataFetcher:
         for tf in timeframes:
             result[tf] = self.sync_klines(symbol, tf, days=30)
         return result
+
+    def fetch_funding_rate_history(
+        self, symbol: str, days: int = 90
+    ) -> pd.DataFrame:
+        """获取资金费率历史（每8h一次）"""
+        try:
+            # OKX资金费率历史
+            all_rates = []
+            end_ts = int(time.time() * 1000)
+            start_ts = end_ts - (days * 24 * 3600 * 1000)
+
+            # ccxt的fetchFundingRateHistory
+            rates = self.exchange.fetch_funding_rate_history(
+                symbol, since=start_ts, limit=100
+            )
+            if rates:
+                for r in rates:
+                    all_rates.append({
+                        "timestamp": r["timestamp"],
+                        "funding_rate": r.get("fundingRate", 0),
+                        "next_funding_time": r.get("nextFundingTimestamp", 0),
+                    })
+
+            if all_rates:
+                df = pd.DataFrame(all_rates)
+                df.drop_duplicates(subset=["timestamp"], inplace=True)
+                df.sort_values("timestamp", inplace=True)
+                logger.info(f"获取 {symbol} 资金费率: {len(df)} 条")
+                return df
+            else:
+                logger.warning(f"{symbol} 无资金费率数据")
+                return pd.DataFrame()
+
+        except Exception as e:
+            logger.error(f"获取 {symbol} 资金费率失败: {e}")
+            return pd.DataFrame()

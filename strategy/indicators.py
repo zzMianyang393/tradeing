@@ -103,6 +103,31 @@ class TechnicalIndicators:
         df["price_change"] = close.pct_change()
         df["volatility"] = close.rolling(window=20).std() / close.rolling(window=20).mean()
 
+        # EMA趋势方向
+        df["ema_trend"] = 0  # 0=neutral, 1=bullish, -1=bearish
+        if "ema_fast" in df.columns and "ema_medium" in df.columns and "ema_slow" in df.columns:
+            df.loc[(df["ema_fast"] > df["ema_medium"]) & (df["ema_medium"] > df["ema_slow"]), "ema_trend"] = 1
+            df.loc[(df["ema_fast"] < df["ema_medium"]) & (df["ema_medium"] < df["ema_slow"]), "ema_trend"] = -1
+
+        # BB宽度（波动率指标）
+        if "bb_upper" in df.columns and "bb_lower" in df.columns and "bb_middle" in df.columns:
+            df["bb_width"] = (df["bb_upper"] - df["bb_lower"]) / df["bb_middle"]
+
+        # 价格相对BB位置
+        if "bb_upper" in df.columns and "bb_lower" in df.columns:
+            bb_range = df["bb_upper"] - df["bb_lower"]
+            df["bb_position"] = (close - df["bb_lower"]) / bb_range.replace(0, np.nan)
+            df["bb_position"] = df["bb_position"].fillna(0.5)
+
+        # 资金费率（如果有）
+        if "funding_rate" in df.columns:
+            df["funding_rate_sma"] = df["funding_rate"].rolling(8).mean()  # 8期=24h均值
+            df["funding_signal"] = 0
+            # 负资金费率 = 空头付费给多头 = 市场过度看空 -> 做多信号
+            df.loc[df["funding_rate"] < -0.0001, "funding_signal"] = 1
+            # 正资金费率 = 多头付费给空头 = 市场过度看多 -> 做空信号
+            df.loc[df["funding_rate"] > 0.0001, "funding_signal"] = -1
+
         return df
 
     def calculate_multi_tf(

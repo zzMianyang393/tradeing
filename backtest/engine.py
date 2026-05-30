@@ -32,7 +32,7 @@ class BacktestEngine:
         self.current_positions: dict[str, dict] = {}
         self.trade_log: list[dict] = []
         self.last_close_bar: dict[str, int] = {}  # 每个币种上次平仓的bar index
-        self.cooldown_bars = 8  # 平仓后冷却8根K线（2小时）
+        self.cooldown_bars = 6  # 平仓后冷却6根K线（1.5小时）
         self.current_bar_index = 0
 
     def run(

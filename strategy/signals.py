@@ -167,7 +167,43 @@ class SignalGenerator:
             strength = long_score / long_total
             if rsi < 20:
                 strength = min(strength + 0.15, 1.0)
+
+            # === Bonus条件（不计入阈值，但增加信号强度）===
+            bonus_score = 0
+            bonus_total = 0
+            bonus_reasons = []
+
+            # Bonus1: MACD柱状图方向（负→正 或 收窄 = 下跌动能减弱）
+            macd_hist = latest.get("macd_hist", 0)
+            prev_macd_hist = prev.get("macd_hist", 0)
+            # 更敏感：柱状图在增大（负值减小或正值增大）
+            if macd_hist > prev_macd_hist:
+                bonus_score += 1
+                bonus_reasons.append("MACD转多")
+            bonus_total += 1
+
+            # Bonus2: RSI底背离（价格接近近期低点但RSI更高 = 卖压衰竭）
+            lookback_n = 20
+            if len(df) >= lookback_n + 2:
+                recent = df.iloc[-(lookback_n + 1):-1]
+                prev_price_low = recent["low"].min()
+                low_idx = recent["low"].idxmin()
+                if low_idx in df.index:
+                    prev_rsi_at_low = df.loc[low_idx].get("rsi", 50)
+                else:
+                    prev_rsi_at_low = 50
+                # 放宽条件：价格在近期低点1.5%范围内，RSI更高
+                if (candle_low <= prev_price_low * 1.015) and (rsi > prev_rsi_at_low + 3):
+                    bonus_score += 1
+                    bonus_reasons.append("RSI底背离")
+            bonus_total += 1
+
+            # Bonus加分
+            if bonus_total > 0:
+                strength = min(strength + 0.1 * (bonus_score / bonus_total), 1.0)
+
             reasons = [k for k, v in long_conditions.items() if v]
+            reasons.extend(bonus_reasons)
             return Signal(
                 type=SignalType.LONG,
                 strength=strength,
@@ -211,7 +247,43 @@ class SignalGenerator:
             strength = short_score / short_total
             if rsi > 80:
                 strength = min(strength + 0.15, 1.0)
+
+            # === Bonus条件（不计入阈值，但增加信号强度）===
+            bonus_score = 0
+            bonus_total = 0
+            bonus_reasons = []
+
+            # Bonus1: MACD柱状图方向（正→负 或 收窄 = 上涨动能减弱）
+            macd_hist = latest.get("macd_hist", 0)
+            prev_macd_hist = prev.get("macd_hist", 0)
+            # 更敏感：柱状图在减小（正值减小或负值增大）
+            if macd_hist < prev_macd_hist:
+                bonus_score += 1
+                bonus_reasons.append("MACD转空")
+            bonus_total += 1
+
+            # Bonus2: RSI顶背离（价格接近近期高点但RSI更低 = 买压衰竭）
+            lookback_n = 20
+            if len(df) >= lookback_n + 2:
+                recent = df.iloc[-(lookback_n + 1):-1]
+                prev_price_high = recent["high"].max()
+                high_idx = recent["high"].idxmax()
+                if high_idx in df.index:
+                    prev_rsi_at_high = df.loc[high_idx].get("rsi", 50)
+                else:
+                    prev_rsi_at_high = 50
+                # 放宽条件：价格在近期高点1.5%范围内，RSI更低
+                if (candle_high >= prev_price_high * 0.985) and (rsi < prev_rsi_at_high - 3):
+                    bonus_score += 1
+                    bonus_reasons.append("RSI顶背离")
+            bonus_total += 1
+
+            # Bonus加分
+            if bonus_total > 0:
+                strength = min(strength + 0.1 * (bonus_score / bonus_total), 1.0)
+
             reasons = [k for k, v in short_conditions.items() if v]
+            reasons.extend(bonus_reasons)
             return Signal(
                 type=SignalType.SHORT,
                 strength=strength,
@@ -336,7 +408,7 @@ class SignalGenerator:
         return None
 
     def _check_long_conditions(self, latest: pd.Series, prev: pd.Series, df: pd.DataFrame) -> dict:
-        """做多条件检查 - EMA交叉 + 动量确认"""
+        """做多条件检查 - 趋势跟踪：EMA排列 + ADX + 动量确认"""
         conditions = {}
 
         ema_fast = latest.get("ema_fast", 0)
@@ -345,40 +417,42 @@ class SignalGenerator:
         prev_ema_fast = prev.get("ema_fast", 0)
         prev_ema_medium = prev.get("ema_medium", 0)
         price = latest.get("close", 0)
+        prev_price = prev.get("close", 0)
 
-        # 条件1: EMA金叉（fast从下方穿过medium）
-        golden_cross = (prev_ema_fast <= prev_ema_medium) and (ema_fast > ema_medium)
-        conditions["EMA金叉"] = golden_cross
+        # 条件1: EMA多头排列（fast > medium > slow）
+        conditions["EMA多头排列"] = ema_fast > ema_medium > ema_slow if all([ema_fast, ema_medium, ema_slow]) else False
 
-        # 条件2: 价格在慢线之上（趋势确认）
-        conditions["价格在慢线之上"] = price > ema_slow * 1.003 if ema_slow > 0 else False
+        # 条件2: 价格在EMA慢线之上（趋势确认）
+        conditions["价格在慢线之上"] = price > ema_slow * 1.002 if ema_slow > 0 else False
 
-        # 条件3: RSI上升动量
+        # 条件3: RSI动量（>50且上升）
         rsi = latest.get("rsi", 50)
         prev_rsi = prev.get("rsi", 50)
-        conditions["RSI上升"] = rsi > prev_rsi and 35 < rsi < 70
+        conditions["RSI多头动量"] = rsi > 50 and rsi > prev_rsi
 
-        # 条件4: 成交量放大
+        # 条件4: 成交量确认（高于均量）
         vol_ratio = latest.get("volume_ratio", 1)
-        conditions["放量确认"] = vol_ratio > 1.2
+        conditions["放量确认"] = vol_ratio > 1.1
 
-        # 条件5: 前K线收阳
+        # 条件5: DI确认（多头力量占优）
+        adx_dmp = latest.get("adx_dmp", 0)
+        adx_dmn = latest.get("adx_dmn", 0)
+        conditions["DI多头"] = adx_dmp > adx_dmn
+
+        # 条件6: MACD柱状图为正或转正
+        macd_hist = latest.get("macd_hist", 0)
+        prev_macd_hist = prev.get("macd_hist", 0)
+        conditions["MACD多头"] = macd_hist > 0 or (macd_hist > prev_macd_hist and prev_macd_hist < 0)
+
+        # 条件7: 前K线收阳（动量确认）
         prev_close = prev.get("close", 0)
         prev_open = prev.get("open", 0)
         conditions["前K线收阳"] = prev_close > prev_open
 
-        # 条件6: DI确认（多头力量）
-        adx_dmp = latest.get("adx_dmp", 0)
-        adx_dmn = latest.get("adx_dmn", 0)
-        conditions["DI确认"] = adx_dmp > adx_dmn
-
-        # 条件7: 价格在EMA9上方（动量确认）
-        conditions["价格在EMA9上方"] = price > ema_fast if ema_fast > 0 else False
-
         return conditions
 
     def _check_short_conditions(self, latest: pd.Series, prev: pd.Series, df: pd.DataFrame) -> dict:
-        """做空条件检查 - EMA死叉 + 动量确认"""
+        """做空条件检查 - 趋势跟踪：EMA排列 + ADX + 动量确认"""
         conditions = {}
 
         ema_fast = latest.get("ema_fast", 0)
@@ -387,34 +461,36 @@ class SignalGenerator:
         prev_ema_fast = prev.get("ema_fast", 0)
         prev_ema_medium = prev.get("ema_medium", 0)
         price = latest.get("close", 0)
+        prev_price = prev.get("close", 0)
 
-        # 条件1: EMA死叉（fast从上方穿过medium）
-        death_cross = (prev_ema_fast >= prev_ema_medium) and (ema_fast < ema_medium)
-        conditions["EMA死叉"] = death_cross
+        # 条件1: EMA空头排列（fast < medium < slow）
+        conditions["EMA空头排列"] = ema_fast < ema_medium < ema_slow if all([ema_fast, ema_medium, ema_slow]) else False
 
-        # 条件2: 价格在慢线之下（趋势确认）
-        conditions["价格在慢线之下"] = price < ema_slow * 0.997 if ema_slow > 0 else False
+        # 条件2: 价格在EMA慢线之下（趋势确认）
+        conditions["价格在慢线之下"] = price < ema_slow * 0.998 if ema_slow > 0 else False
 
-        # 条件3: RSI下降动量
+        # 条件3: RSI动量（<50且下降）
         rsi = latest.get("rsi", 50)
         prev_rsi = prev.get("rsi", 50)
-        conditions["RSI下降"] = rsi < prev_rsi and 30 < rsi < 65
+        conditions["RSI空头动量"] = rsi < 50 and rsi < prev_rsi
 
-        # 条件4: 成交量放大
+        # 条件4: 成交量确认（高于均量）
         vol_ratio = latest.get("volume_ratio", 1)
-        conditions["放量确认"] = vol_ratio > 1.2
+        conditions["放量确认"] = vol_ratio > 1.1
 
-        # 条件5: 前K线收阴
+        # 条件5: DI确认（空头力量占优）
+        adx_dmp = latest.get("adx_dmp", 0)
+        adx_dmn = latest.get("adx_dmn", 0)
+        conditions["DI空头"] = adx_dmn > adx_dmp
+
+        # 条件6: MACD柱状图为负或转负
+        macd_hist = latest.get("macd_hist", 0)
+        prev_macd_hist = prev.get("macd_hist", 0)
+        conditions["MACD空头"] = macd_hist < 0 or (macd_hist < prev_macd_hist and prev_macd_hist > 0)
+
+        # 条件7: 前K线收阴（动量确认）
         prev_close = prev.get("close", 0)
         prev_open = prev.get("open", 0)
         conditions["前K线收阴"] = prev_close < prev_open
-
-        # 条件6: DI确认（空头力量）
-        adx_dmp = latest.get("adx_dmp", 0)
-        adx_dmn = latest.get("adx_dmn", 0)
-        conditions["DI确认"] = adx_dmn > adx_dmp
-
-        # 条件7: 价格在EMA9下方（动量确认）
-        conditions["价格在EMA9下方"] = price < ema_fast if ema_fast > 0 else False
 
         return conditions

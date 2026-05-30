@@ -40,7 +40,7 @@ rules:
   min_conditions_strict: 6 # 反方向要求所有条件
   long_conditions_min: 6   # 做多要求所有6个条件（更严格）
   direction_mode: "both"  # long_only=倾向做多但强信号可做空, both=双向, short_only=倾向做空
-  strategy_mode: "mean_reversion"  # trend=趋势跟踪, mean_reversion=均值回归, momentum=动量突破
+  strategy_mode: "mean_reversion"  # auto=根据ADX自动选择, trend=趋势跟踪, mean_reversion=均值回归, momentum=动量突破
 
 # ADX 趋势强度过滤
 adx:
@@ -86,15 +86,15 @@ leverage:
 
 # 止损策略
 stop_loss:
-  max_pct: 0.025             # 固定止损 2.5%（深度反转需要更宽止损）
-  fixed_pct: 0.025           # 固定止损 2.5%
+  max_pct: 0.04              # 日线止损 4%（日线波动更大）
+  fixed_pct: 0.04            # 日线止损 4%
   trailing_activate: 0       # 禁用追踪止损
   trailing_callback: 0       # 禁用追踪止损
   trailing_long_only: false
 
 # 止盈策略
 take_profit:
-  fixed_pct: 0.0375          # 固定止盈 3.75% (1.5:1 盈亏比)
+  fixed_pct: 0.06            # 日线止盈 6% (1.5:1 盈亏比)
   risk_reward_ratio: 1.5
   partial_close_pct: 0.5     # 部分止盈50%
-  partial_close_trigger: 0.03   # 盈利3%时部分止盈（剩余运行到3.75%）
+  partial_close_trigger: 0.04   # 盈利4%时部分止盈（剩余运行到6%）
