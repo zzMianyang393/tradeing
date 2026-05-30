@@ -156,7 +156,7 @@ class HybridStrategy:
         return advice
 
     def _detect_market_regime(self, df: pd.DataFrame) -> dict:
-        """检测市场regime：趋势/震荡/不确定"""
+        """检测市场regime：根据ADX和趋势方向选择策略"""
         latest = df.iloc[-1]
 
         adx = latest.get("adx", 20)
@@ -176,22 +176,18 @@ class HybridStrategy:
         # 计算趋势强度 (0-1)
         trend_strength = min(adx / 40, 1.0)
 
-        # 默认使用均值回归（更安全）
-        strategy = "mean_reversion"
-        confidence = 0.6
-
-        # 只有在非常明确的强趋势时才切换到趋势策略
-        if adx >= 32 and trend_direction != "neutral":
-            # 非常强的趋势 → 趋势跟踪
+        # 根据市场状态选择策略
+        if adx >= 30 and trend_direction != "neutral":
+            # 强趋势 → 趋势跟踪（顺势交易）
             strategy = "trend"
             confidence = min(0.5 + trend_strength * 0.4, 0.9)
-        elif adx <= 20:
-            # 弱趋势 → 均值回归
+        elif adx <= 18:
+            # 弱趋势/震荡 → 均值回归（逆势交易）
             strategy = "mean_reversion"
             confidence = 0.7
         else:
-            # 中等趋势 → 保守选择均值回归
-            strategy = "mean_reversion"
+            # 中等趋势 → 尝试两种策略，选最强信号
+            strategy = "auto_both"
             confidence = 0.5
 
         return {
@@ -214,25 +210,32 @@ class HybridStrategy:
 
         if strategy_mode == "auto":
             regime = self._detect_market_regime(df)
-            self.signal_gen.strategy_mode = regime["strategy"]
 
-            rule_signal = self.signal_gen.generate(df)
+            if regime["strategy"] == "auto_both":
+                # 中等趋势：尝试两种策略，选最强信号
+                best_signal = None
+                best_strength = 0
 
-            # 如果主策略无信号，尝试备选策略
-            if rule_signal is None:
-                fallback = "mean_reversion" if regime["strategy"] == "trend" else "trend"
-                self.signal_gen.strategy_mode = fallback
+                for try_mode in ["mean_reversion", "trend"]:
+                    self.signal_gen.strategy_mode = try_mode
+                    sig = self.signal_gen.generate(df)
+                    if sig is not None and sig.strength > best_strength:
+                        best_signal = sig
+                        best_strength = sig.strength
+
+                self.signal_gen.strategy_mode = "auto"
+                rule_signal = best_signal
+            else:
+                self.signal_gen.strategy_mode = regime["strategy"]
                 rule_signal = self.signal_gen.generate(df)
-
-            # 恢复原始模式
-            self.signal_gen.strategy_mode = "auto"
+                self.signal_gen.strategy_mode = "auto"
 
             if rule_signal is None:
                 return None
 
-            # 根据市场regime调整信号强度
+            # 低信心时削弱信号
             if regime["confidence"] < 0.5:
-                rule_signal.strength *= 0.8  # 低信心时削弱信号
+                rule_signal.strength *= 0.8
         else:
             rule_signal = self.signal_gen.generate(df)
             if rule_signal is None:
