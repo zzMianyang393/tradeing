@@ -214,6 +214,15 @@ class OrderExecutor:
             logger.error(f"获取持仓失败: {e}")
             return []
 
+    def get_recent_fills(self, symbol: str, limit: int = 5) -> list:
+        """获取最近成交记录，用于检测OKX条件单触发的平仓"""
+        try:
+            trades = self.exchange.fetch_my_trades(symbol, limit=limit)
+            return trades
+        except Exception as e:
+            logger.warning(f"获取成交记录失败 {symbol}: {e}")
+            return []
+
     def test_connection(self) -> bool:
         try:
             balance = self.get_balance()

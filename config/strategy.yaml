@@ -36,7 +36,7 @@ indicators:
 
 # 规则信号
 rules:
-  min_conditions: 4       # 4h趋势过滤 + RSI极值 + 成交量确认
+  min_conditions: 2       # trend_4h_filter: RSI极值 + 成交量确认（2个条件全部满足）
   min_conditions_strict: 6
   long_conditions_min: 0
   direction_mode: "both"

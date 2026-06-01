@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Optional
 from datetime import datetime
 
+import ccxt
 import pandas as pd
 from loguru import logger
 
@@ -38,6 +39,57 @@ class BacktestEngine:
         # Per-bar portfolio tracking for Sharpe calculation
         self.portfolio_values: list[float] = []
         self.daily_returns: list[float] = []
+
+        # 合约最小张数检查：从OKX获取market info（与模拟盘对齐）
+        self._market_cache: dict[str, dict] = {}  # symbol -> {contract_size, min_contracts}
+        try:
+            self._exchange = ccxt.okx({"enableRateLimit": True})
+        except Exception as e:
+            logger.warning(f"初始化OKX连接失败（合约检查将使用默认值）: {e}")
+            self._exchange = None
+
+    def _get_market_info(self, symbol: str) -> tuple[float, float]:
+        """获取合约的contractSize和min_contracts，与OKX模拟盘对齐。
+        返回 (contract_size, min_contracts)，默认 (0.01, 1)。"""
+        if symbol in self._market_cache:
+            info = self._market_cache[symbol]
+            return info["contract_size"], info["min_contracts"]
+
+        contract_size = 0.01
+        min_contracts = 1.0
+
+        if self._exchange is not None:
+            try:
+                market = self._exchange.market(symbol)
+                contract_size = float(market.get("contractSize", 0.01))
+                min_contracts = float(market.get("limits", {}).get("amount", {}).get("min", 1))
+                logger.info(f"  {symbol}: contractSize={contract_size}, min={min_contracts}张")
+            except Exception as e:
+                logger.warning(f"  {symbol}: 获取market info失败，使用默认值: {e}")
+
+        self._market_cache[symbol] = {
+            "contract_size": contract_size,
+            "min_contracts": min_contracts,
+        }
+        return contract_size, min_contracts
+
+    def _check_min_margin(self, symbol: str, amount_usdt: float,
+                           entry_price: float, leverage: int) -> bool:
+        """检查金额是否满足OKX最小合约张数要求。
+        返回 True=可以开仓, False=资金不足跳过。"""
+        contract_size, min_contracts = self._get_market_info(symbol)
+        # 名义价值 = 金额 * 杠杆
+        notional = amount_usdt * leverage
+        # 可开张数 = 名义价值 / (每张价值)
+        contracts = notional / (contract_size * entry_price)
+        if contracts < min_contracts:
+            min_margin = min_contracts * contract_size * entry_price / leverage
+            logger.info(
+                f"[合约限制] {symbol} {amount_usdt:.2f}U < 最低{min_margin:.2f}U "
+                f"(需{min_contracts}张×{contract_size}×{entry_price:.2f}/{leverage}x)"
+            )
+            return False
+        return True
 
     def run(
         self,
@@ -435,6 +487,10 @@ class BacktestEngine:
         )
 
         if position.amount_usdt <= 0:
+            return
+
+        # 合约最小张数检查（与OKX模拟盘对齐）
+        if not self._check_min_margin(symbol, position.amount_usdt, entry_price, position.leverage):
             return
 
         self.current_positions[symbol] = {

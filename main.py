@@ -229,6 +229,8 @@ def cmd_live(args, config: dict):
     logger.info(f"扫描间隔: {scan_interval}秒")
 
     running = True
+    known_positions = {}  # 跟踪已知持仓，用于检测OKX条件单平仓
+
     def _stop(signum, frame):
         nonlocal running
         logger.info("收到停止信号，准备退出...")
@@ -251,6 +253,7 @@ def cmd_live(args, config: dict):
                 config=config,
                 storage=storage,
                 current_capital=current_capital,
+                known_positions=known_positions,
             )
         except Exception as e:
             logger.error(f"交易循环异常: {e}")
@@ -287,7 +290,7 @@ def _calc_used_margin(positions: list) -> float:
 def _live_tick(
     executor, strategy, indicators, stop_loss_mgr, take_profit_mgr,
     position_sizer, fetcher, symbols, timeframe, config, storage=None,
-    current_capital=None,
+    current_capital=None, known_positions=None,
 ):
     real_balance = executor.get_balance()
     positions = executor.get_positions()
@@ -303,6 +306,51 @@ def _live_tick(
         logger.warning("API验证失败，本轮不开新仓")
 
     position_symbols = {p["symbol"] for p in positions}
+
+    # --- 检测OKX条件单触发的平仓 ---
+    # 如果 known_positions 中有某个symbol，但当前positions中没有了，说明被OKX平仓了
+    if known_positions is not None:
+        for sym, prev_pos in list(known_positions.items()):
+            if sym not in position_symbols:
+                # 持仓消失了 — OKX条件单(SL/TP)触发
+                close_reason = "OKX条件单平仓"
+                # 尝试从成交记录获取平仓价格
+                exit_price = None
+                try:
+                    fills = executor.get_recent_fills(sym, limit=3)
+                    if fills:
+                        # 找最近一笔与持仓方向相反的成交
+                        prev_side = prev_pos.get("side", "")
+                        for fill in fills:
+                            fill_side = fill.get("side", "")
+                            # 平多=sell，平空=buy
+                            is_close = (prev_side == "long" and fill_side == "sell") or \
+                                       (prev_side == "short" and fill_side == "sell" and fill.get("info", {}).get("posSide") == "long")
+                            if is_close or fill.get("info", {}).get("ordType") in ("conditional", "trigger"):
+                                exit_price = float(fill.get("price", 0))
+                                if exit_price > 0:
+                                    close_reason = "止损" if "sl" in str(fill.get("info", {})).lower() else \
+                                                   "止盈" if "tp" in str(fill.get("info", {})).lower() else \
+                                                   "OKX条件单平仓"
+                                    break
+                except Exception as e:
+                    logger.warning(f"获取{sym}成交记录失败: {e}")
+
+                if exit_price is None or exit_price <= 0:
+                    # 用当前价格作为fallback
+                    try:
+                        ticker = executor.exchange.fetch_ticker(sym)
+                        exit_price = float(ticker["last"])
+                    except Exception:
+                        exit_price = float(prev_pos.get("entryPrice", 0))
+
+                logger.info(f"[OKX平仓检测] {sym} {prev_pos.get('side','')} | 原因={close_reason} | exit={exit_price}")
+                _record_trade(storage, sym, prev_pos.get("side", "long"), prev_pos, exit_price, close_reason)
+
+        # 更新known_positions为当前持仓
+        known_positions.clear()
+        for p in positions:
+            known_positions[p["symbol"]] = dict(p)
 
     # --- 资金隔离 ---
     if current_capital is not None:
@@ -335,7 +383,8 @@ def _live_tick(
             elif api_ok:
                 # HIGH #4: 每次开仓后扣减available，避免超支
                 opened = _try_open(executor, strategy, position_sizer, stop_loss_mgr,
-                          take_profit_mgr, symbol, df, available, config, storage=storage)
+                          take_profit_mgr, symbol, df, available, config, storage=storage,
+                          current_positions=len(positions))
                 if opened:
                     available = max(available - opened, 0)
 
@@ -406,7 +455,8 @@ def _manage_position(executor, strategy, symbol, positions, df, config, storage=
 
 
 def _try_open(executor, strategy, position_sizer, stop_loss_mgr,
-              take_profit_mgr, symbol, df, available, config, storage=None):
+              take_profit_mgr, symbol, df, available, config, storage=None,
+              current_positions=0):
     """尝试开仓，返回实际使用的保证金金额（用于available扣减），失败返回0"""
     fixed_sl_pct = config.get("stop_loss", {}).get("fixed_pct", 0.008)
     fixed_tp_pct = config.get("take_profit", {}).get("fixed_pct", 0.005)
@@ -416,7 +466,7 @@ def _try_open(executor, strategy, position_sizer, stop_loss_mgr,
     can_open, reason = position_sizer.can_open_position(
         balance=available,
         daily_pnl=0,  # TODO: 接入日内盈亏
-        current_positions=0,  # 由调用方传入更准确，但先用0
+        current_positions=current_positions,
     )
     if not can_open:
         logger.info(f"[风控拒绝] {symbol}: {reason}")
@@ -445,7 +495,7 @@ def _try_open(executor, strategy, position_sizer, stop_loss_mgr,
         entry_price=entry_price_for_sizer,
         stop_distance_pct=fixed_sl_pct,
         signal_strength=signal.strength if hasattr(signal, 'strength') else 0.5,
-        current_positions=0,
+        current_positions=current_positions,
         total_trades=total_trades_count,
     )
     amount_usdt = pos_size.amount_usdt if pos_size.amount_usdt > 0 else available * 0.50

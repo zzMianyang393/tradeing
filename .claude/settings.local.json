@@ -4,7 +4,16 @@
       "Bash(python *)",
       "Bash(git add *)",
       "Bash(git commit *)",
-      "Bash(git push *)"
+      "Bash(git push *)",
+      "Bash(git pull *)",
+      "Bash(Get-ChildItem -Path \"E:\\\\ai-trade\\\\Quantify\" -Recurse -File)",
+      "Bash(Select-Object FullName)",
+      "Bash(Sort-Object FullName)",
+      "Bash(cmd *)",
+      "PowerShell($env:PYTHONIOENCODING='utf-8'; python standalone_backtest.py)",
+      "PowerShell($env:PYTHONIOENCODING='utf-8'; python standalone_backtest.py 30)",
+      "PowerShell($env:PYTHONIOENCODING='utf-8'; python standalone_backtest.py 60)",
+      "PowerShell($env:PYTHONIOENCODING='utf-8'; python standalone_backtest.py 90)"
     ]
   }
 }

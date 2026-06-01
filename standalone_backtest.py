@@ -82,7 +82,7 @@ def calculate_indicators(df):
 
 def run_backtest(df, sl=0.015, tp=0.015, rsi_long=40, rsi_short=60,
                  vol_thresh=1.0, position_size=2.0, leverage=5,
-                 fee_rate=0.001, cooldown_bars=6):
+                 fee_rate=0.001, cooldown_bars=6, min_margin=1.0):
     """独立回测 - 4h趋势过滤 + RSI + 成交量
 
     策略逻辑:
@@ -90,6 +90,7 @@ def run_backtest(df, sl=0.015, tp=0.015, rsi_long=40, rsi_short=60,
       - 4h趋势bearish + 15m RSI>60 + volume>1.0 → 做空
       - SL=TP=1.5%, 杠杆5x, 手续费0.1% (双边)
     """
+    skipped_min_margin = 0
     df = calculate_indicators(df.copy())
     trend_map = compute_4h_trend(df)
     df = df.reset_index(drop=True)
@@ -109,6 +110,39 @@ def run_backtest(df, sl=0.015, tp=0.015, rsi_long=40, rsi_short=60,
 
         if cooldown > 0:
             cooldown -= 1
+            # 冷却期内仍然检查持仓止损止盈（修复：避免持仓无法及时平仓）
+            if in_pos:
+                d = pos['dir']
+                if d == 'long':
+                    if row['low'] <= pos['sl']:
+                        ret = ((pos['sl'] - pos['entry']) / pos['entry']) * leverage - fee_rate
+                        pnl = position_size * ret
+                        trades.append(pnl)
+                        returns.append(ret)
+                        balance += pnl
+                        in_pos = False
+                    elif row['high'] >= pos['tp']:
+                        ret = ((pos['tp'] - pos['entry']) / pos['entry']) * leverage - fee_rate
+                        pnl = position_size * ret
+                        trades.append(pnl)
+                        returns.append(ret)
+                        balance += pnl
+                        in_pos = False
+                else:
+                    if row['high'] >= pos['sl']:
+                        ret = ((pos['entry'] - pos['sl']) / pos['entry']) * leverage - fee_rate
+                        pnl = position_size * ret
+                        trades.append(pnl)
+                        returns.append(ret)
+                        balance += pnl
+                        in_pos = False
+                    elif row['low'] <= pos['tp']:
+                        ret = ((pos['entry'] - pos['tp']) / pos['entry']) * leverage - fee_rate
+                        pnl = position_size * ret
+                        trades.append(pnl)
+                        returns.append(ret)
+                        balance += pnl
+                        in_pos = False
             continue
 
         # --- 检查现有持仓 ---
@@ -161,6 +195,11 @@ def run_backtest(df, sl=0.015, tp=0.015, rsi_long=40, rsi_short=60,
             if pd.isna(rsi) or pd.isna(vol_r):
                 continue
 
+            # 最小保证金检查（与OKX模拟盘对齐）
+            if position_size < min_margin:
+                skipped_min_margin += 1
+                continue
+
             if htf == 'bullish' and rsi < rsi_long and vol_r > vol_thresh:
                 in_pos = True
                 pos = {
@@ -203,12 +242,16 @@ def run_backtest(df, sl=0.015, tp=0.015, rsi_long=40, rsi_short=60,
         'balance': balance,
         'wins': wins,
         'losses': len(trades) - wins,
+        'skipped_min_margin': skipped_min_margin,
     }
 
 
 # ==================== 主函数 ====================
 
 def main():
+    import sys
+    oos_days = int(sys.argv[1]) if len(sys.argv) > 1 else 7
+
     coins = [
         'BTC/USDT:USDT', 'ETH/USDT:USDT', 'SOL/USDT:USDT', 'DOGE/USDT:USDT',
         'XRP/USDT:USDT', 'ADA/USDT:USDT', 'AVAX/USDT:USDT', 'DOT/USDT:USDT',
@@ -216,16 +259,21 @@ def main():
         'SUI/USDT:USDT', 'APT/USDT:USDT', 'NEAR/USDT:USDT',
     ]
 
-    split_ts = int(datetime(2026, 5, 24).timestamp() * 1000)
-    oos_end = int(datetime(2026, 5, 31).timestamp() * 1000)
+    # 样本外结束时间 = 当前最新数据往前推oos_days天
+    from datetime import timezone
+    now_ts = int(datetime.now(timezone.utc).timestamp() * 1000)
+    oos_start = now_ts - oos_days * 24 * 3600 * 1000
+    split_ts = oos_start  # 样本内/样本外分界线
 
     SL = 0.015
     TP = 0.015
 
+    oos_start_dt = datetime.utcfromtimestamp(oos_start / 1000).strftime('%Y-%m-%d')
+    oos_end_dt = datetime.utcfromtimestamp(now_ts / 1000).strftime('%Y-%m-%d')
+
     print("=" * 80)
     print(f"Strategy: 4h Trend Filter (SL={SL:.1%}, TP={TP:.1%})")
-    print(f"In-sample: before 2026-05-24")
-    print(f"Out-of-sample: 2026-05-24 → 2026-05-30")
+    print(f"Out-of-sample: {oos_start_dt} -> {oos_end_dt} ({oos_days} days)")
     print("=" * 80)
 
     # ========== IN-SAMPLE ==========
@@ -235,6 +283,7 @@ def main():
     is_total_w = 0
     is_total_pnl = 0
     is_profitable = 0
+    is_skipped = 0
 
     for coin in coins:
         df = load_data(coin)
@@ -248,23 +297,26 @@ def main():
         is_total_t += result['trades']
         is_total_w += result['wins']
         is_total_pnl += result['total_pnl']
+        is_skipped += result['skipped_min_margin']
         if result['total_pnl'] > 0:
             is_profitable += 1
 
         name = coin.split('/')[0]
         status = '✅' if result['total_pnl'] > 0 else '⚠️'
+        skip_info = f", skipped={result['skipped_min_margin']}" if result['skipped_min_margin'] else ""
         print(f"  {status} {name:6s}: trades={result['trades']:4d}, WR={result['win_rate']:5.1%}, "
-              f"PnL={result['total_pnl']:+8.4f}, Sharpe={result['sharpe']:7.2f}")
+              f"PnL={result['total_pnl']:+8.4f}, Sharpe={result['sharpe']:7.2f}{skip_info}")
 
     is_wr = is_total_w / is_total_t if is_total_t else 0
 
     # ========== OUT-OF-SAMPLE ==========
-    print("\n📊 OUT-OF-SAMPLE BACKTEST (7 days: May 24-30)")
+    print(f"\n📊 OUT-OF-SAMPLE BACKTEST ({oos_days} days: {oos_start_dt} -> {oos_end_dt})")
     print("-" * 60)
     oos_total_t = 0
     oos_total_w = 0
     oos_total_pnl = 0
     oos_profitable = 0
+    oos_skipped = 0
 
     for coin in coins:
         df = load_data(coin)
@@ -272,19 +324,21 @@ def main():
             name = coin.split('/')[0]
             print(f"  ⚠️ {name:6s}: NO DATA")
             continue
-        test = df[(df['timestamp'] >= split_ts) & (df['timestamp'] < oos_end)].copy()
+        test = df[(df['timestamp'] >= split_ts) & (df['timestamp'] < now_ts)].copy()
         result = run_backtest(test, sl=SL, tp=TP)
 
         oos_total_t += result['trades']
         oos_total_w += result['wins']
         oos_total_pnl += result['total_pnl']
+        oos_skipped += result['skipped_min_margin']
         if result['total_pnl'] > 0:
             oos_profitable += 1
 
         name = coin.split('/')[0]
         status = '✅' if result['total_pnl'] > 0 else '⚠️'
+        skip_info = f", skipped={result['skipped_min_margin']}" if result['skipped_min_margin'] else ""
         print(f"  {status} {name:6s}: trades={result['trades']:4d}, WR={result['win_rate']:5.1%}, "
-              f"PnL={result['total_pnl']:+8.4f}, Sharpe={result['sharpe']:7.2f}")
+              f"PnL={result['total_pnl']:+8.4f}, Sharpe={result['sharpe']:7.2f}{skip_info}")
 
     oos_wr = oos_total_w / oos_total_t if oos_total_t else 0
 
@@ -297,12 +351,14 @@ def main():
     print(f"  Win rate: {is_wr:.1%}")
     print(f"  Total PnL: {is_total_pnl:+.4f} U")
     print(f"  Profitable coins: {is_profitable}/{len(coins)}")
+    print(f"  Skipped (min margin): {is_skipped}")
 
-    print(f"\nOut-of-Sample (7 days):")
+    print(f"\nOut-of-Sample ({oos_days} days):")
     print(f"  Total trades: {oos_total_t}")
     print(f"  Win rate: {oos_wr:.1%}")
     print(f"  Total PnL: {oos_total_pnl:+.4f} U")
     print(f"  Profitable coins: {oos_profitable}/{len(coins)}")
+    print(f"  Skipped (min margin): {oos_skipped}")
 
     # ========== VALIDATION ==========
     print(f"\n{'=' * 80}")
