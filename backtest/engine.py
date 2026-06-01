@@ -46,6 +46,7 @@ class BacktestEngine:
         train_data: Optional[pd.DataFrame] = None,
         htf_data: Optional[pd.DataFrame] = None,
         htf4_data: Optional[pd.DataFrame] = None,
+        full_df: Optional[pd.DataFrame] = None,
     ) -> dict:
         # 每个币种回测前重置每日盈亏计数器
         self.account.daily_pnl = 0.0
@@ -74,9 +75,11 @@ class BacktestEngine:
                 htf_4h = None
 
         # 存储4h数据供 trend_4h_filter 策略使用
-        # 即使没有外部4h数据，也从15m数据自动重采样生成4h（供trend_4h_filter策略使用）
-        if htf_4h is None and "timestamp" in df.columns:
-            tmp = df[["timestamp", "open", "high", "low", "close", "volume"]].copy()
+        # 优先用 full_df 重采样（包含完整历史，EMA55计算准确）
+        # 否则用当前 df 重采样（窗口数据，可能不够长）
+        resample_source = full_df if full_df is not None and not full_df.empty else df
+        if htf_4h is None and "timestamp" in resample_source.columns:
+            tmp = resample_source[["timestamp", "open", "high", "low", "close", "volume"]].copy()
             tmp.index = pd.to_datetime(tmp["timestamp"], unit="ms")
             resampled = tmp.resample("4h").agg({
                 "open": "first", "high": "max", "low": "min",

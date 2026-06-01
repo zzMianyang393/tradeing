@@ -487,7 +487,7 @@ def _try_open(executor, strategy, position_sizer, stop_loss_mgr,
         executor.set_take_profit(symbol, signal.direction, tp_price, contracts=actual_contracts)
         if entry_advice:
             logger.info(f"[ML开仓建议] {symbol} {signal.direction} | {entry_advice['reason']}")
-        logger.info(f"[开仓] {symbol} LONG 入场={fill_price} SL={sl_price} TP={tp_price} 金额={amount_usdt:.2f}U 张数={actual_contracts}")
+        logger.info(f"[开仓] {symbol} {signal.direction.upper()} 入场={fill_price} SL={sl_price} TP={tp_price} 金额={amount_usdt:.2f}U 张数={actual_contracts}")
         return amount_usdt  # 返回实际使用的保证金，供available扣减
 
     return 0

@@ -69,11 +69,11 @@ class DataFetcher:
             start_ts = latest + tf_ms
 
         all_data = []
-        current = start_ts
+        current = int(start_ts)
         empty_retries = 0
 
         while current < end_ts:
-            batch = self.fetch_ohlcv(symbol, timeframe, since=current, limit=300)
+            batch = self.fetch_ohlcv(symbol, timeframe, since=int(current), limit=300)
             if batch.empty:
                 empty_retries += 1
                 if empty_retries <= 2:
